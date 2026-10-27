@@ -1,5 +1,7 @@
 # 麦麦很好奇（Memory Keeper）
 
+> *“你们在聊什么呀，麦麦我很好奇！”*
+
 让麦麦自己整理自己的「记忆库」：黑话、表达方式、表情包三套内置数据，加上一份群友日程待办。
 
 MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目往往缺少解释、彼此重复，或者只是一句话碎片。这个插件在后台定期巡检这些库，结合**群内真实用法 + 联网检索多轮自证**，把「不敢确定」的东西留在待办池里观察，确认后才写回、注入上下文或归档。所有写回（含人物卡归档）都可以先 dry-run。
@@ -31,19 +33,139 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 
 ## 配置
 
-配置由 Runner 在首次加载时按 `config_model` 自动生成到插件目录 `config.toml`（全部字段带中文注释；**仓库不包含该文件**，升级不会覆盖/冲突）。几个常用开关：
+配置由 Runner 在首次加载时按 `config_model` 自动生成到插件目录 `config.toml`（全部字段带中文注释；**仓库不包含该文件**，升级不会覆盖/冲突）。
 
-| 配置项 | 说明 | 默认 |
+在 WebUI 的插件配置页里，未填写的输入框会直接显示默认值，输入框下方的说明文字就是下表的「说明」列（含取值范围与示例）——不用翻文档也能看懂每个参数控制什么。下面按面板顺序逐项列出：
+
+### 插件
+
+| 参数 | 说明 | 默认 |
 |---|---|---|
-| `[plugin] enabled` | 总开关 | `true` |
-| `[jargon] writeback` | 是否写回黑话库；`false` 时只出报告 | `true` |
-| `[agenda] writeback` | 是否写回日程；`false` 时 dry-run（不写日程文件、不归档人物卡） | `true` |
-| `[agenda] archive_to_person` | 是否把结束的日程归档到宿主人物卡 `PersonInfo.memory_points`（dry-run 时不写） | `true` |
-| `[agenda] confirm_min_hits` | 同一件事被提到几次才算确认 | `2` |
-| `[agenda] abstract_window_hours` | 「一会儿/之后」类安排的观察窗 | `24` |
-| `[agenda] max_archive_per_run` | 每轮最多归档多少条（0=不限制；超出顺延到下一轮；dry-run 不写人物卡、不受此限） | `10` |
-| `[inject] max_chars` | 注入上下文的最大字数 | `420` |
-| `[web] api_key` | 联网检索用的 DeepSeek API Key（[platform.deepseek.com](https://platform.deepseek.com) 自行申请）；留空则**只使用群内证据**，不联网 | `""` |
+| `enabled` | 插件总开关（true/false，默认 true；关闭后不再巡检，也不再注入上下文） | `true` |
+| `config_version` | 配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改） | `0.1.3` |
+
+### 调度
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `tick_minutes` | 调度器多久检查一次到期模块（分钟，默认 30；范围 1–1440；例：30=每半小时检查一次） | `30` |
+| `run_on_load` | 插件加载后是否立刻执行一轮到期模块（true/false，默认 true） | `true` |
+| `startup_delay_seconds` | 加载后等待多少秒再开始首轮巡检（秒，默认 90；范围 0–600） | `90` |
+
+### 黑话学习
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `enabled` | 是否启用黑话学习模块（true/false，默认 true） | `true` |
+| `interval_minutes` | 黑话模块运行间隔（分钟，默认 360=6 小时；范围 0–43200；0=不自动运行） | `360` |
+| `batch_size` | 每次交给 LLM 判定的候选词数量（默认 6；范围 1–50） | `6` |
+| `max_candidates` | 单次最多处理多少个候选词（默认 30；范围 1–500） | `30` |
+| `min_count` | 一个词至少出现过多少次才进入候选（默认 2；范围 1–100） | `2` |
+| `evidence_lines` | 每个候选词最多带多少条上下文证据（默认 12；范围 1–50） | `12` |
+| `llm_task` | 调用宿主哪个 LLM 任务（默认 utils；示例：utils / chat，需与宿主模型配置里的任务名一致） | `utils` |
+| `max_tokens` | 单次 LLM 输出 token 上限（默认 4000；范围 256–32768） | `4000` |
+| `temperature` | LLM 采样温度（默认 0.1；范围 0–2；越低越保守） | `0.1` |
+| `writeback` | 关闭时只出报告；打开后才会更新/删除黑话库（true/false，默认 true；首次建议先 false 观察报告） | `true` |
+| `min_confidence` | 低于该置信度的判定不写回（默认 0.6；范围 0–1；例：0.6=置信度 60% 以上才写） | `0.6` |
+| `delete_rejected` | 把判定为常见词/无意义的候选从黑话库删除（true/false，默认 true） | `true` |
+| `clear_high_frequency_terms` | 写回成功时清空高频词表（整表清空、不可恢复；只影响黑话匹配打分，一般保持关闭；true/false，默认 false） | `false` |
+| `max_writes_per_run` | 单次最多写回多少条黑话（默认 40；范围 0–1000；0=不写回） | `40` |
+| `group_usage_hours` | 自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760） | `336` |
+
+### 联网检索
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `enabled` | 联网检索总开关（true/false，默认 true；未填写 api_key 时即使开启也只使用群内证据） | `true` |
+| `api_key` | DeepSeek API Key，联网检索自证用（示例：sk-xxxx；在 platform.deepseek.com 自行申请；留空=不联网，只用群内证据） | `""` |
+| `base_url` | DeepSeek API 地址（留空=默认 https://api.deepseek.com；仅建议填写可信的 API 地址） | `""` |
+| `timeout_seconds` | 单次联网请求超时（秒，默认 25；范围 1–120） | `25` |
+| `per_term_results` | 每个词最多取几条搜索结果（默认 3；范围 1–10） | `3` |
+| `max_searches_per_run` | 单次巡检最多联网检索多少个词（默认 6；范围 0–50） | `6` |
+| `fetch_top_page` | 是否抓取排名第一结果的正文字摘要（true/false，默认 true） | `true` |
+| `cache_ttl_hours` | 检索结果缓存时长（小时，默认 720=30 天；范围 1–8760；避免重复花费） | `720` |
+| `verification_rounds` | 多轮自证轮数（默认 2；范围 1–5；各轮结果一致才固定含义） | `2` |
+| `verify_terms_per_run` | 单次最多对多少个词做多轮自证（默认 4；范围 0–50） | `4` |
+| `verify_max_attempts` | 单个词最多自证几次，超过就放弃（默认 3；范围 1–10；避免无限花 token） | `3` |
+
+### 表达方式
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `enabled` | 是否启用表达方式优化模块（true/false，默认 true） | `true` |
+| `interval_minutes` | 表达模块运行间隔（分钟，默认 10080=7 天；范围 0–525600；0=不自动运行） | `10080` |
+| `batch_size` | 每次交给 LLM 处理的表达条数（默认 20；范围 1–40；40 易触发输出截断，20 更稳） | `20` |
+| `max_rows` | 单次最多扫描多少条 AI 学习表达（默认 120；范围 1–1000） | `120` |
+| `llm_task` | 调用宿主哪个 LLM 任务（默认 utils；需与宿主模型配置里的任务名一致） | `utils` |
+| `max_tokens` | 单次 LLM 输出 token 上限（默认 4000；范围 256–32768） | `4000` |
+| `similarity_threshold` | embedding 相似度达到多少视为重复并合并（默认 0.92；范围 0–1） | `0.92` |
+| `writeback` | 关闭时只出报告；打开后才会合并/改写/删除表达（true/false，默认 true） | `true` |
+| `delete_meaningless` | 是否删除判定为无意义的表达（true/false，默认 true） | `true` |
+| `min_confidence` | 低于该置信度的判定不写回（默认 0.65；范围 0–1） | `0.65` |
+| `max_writes_per_run` | 单次最多写回多少条表达（默认 200；范围 0–2000） | `200` |
+| `auto_check` | 是否把高置信表达自动标记为可注入（true/false，默认 false；仍建议人工勾选） | `false` |
+| `verification_rounds` | 多轮自证轮数（默认 2；范围 1–5；群内用法 + 联网检索） | `2` |
+| `verify_terms_per_run` | 单次最多对多少条表达做多轮自证（默认 8；范围 0–50） | `8` |
+| `group_usage_hours` | 自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760） | `336` |
+
+### 表情包
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `enabled` | 是否启用表情包库优化模块（true/false，默认 true） | `true` |
+| `interval_minutes` | 表情模块运行间隔（分钟，默认 43200=30 天；范围 0–525600；0=不自动运行） | `43200` |
+| `batch_size` | 每次交给 LLM 处理的表情数量（默认 8；范围 1–40） | `8` |
+| `max_emoji` | 单次最多处理多少张已注册表情（默认 300；范围 1–2000） | `300` |
+| `llm_task` | 调用宿主哪个 LLM 任务（默认 utils；需与宿主模型配置里的任务名一致） | `utils` |
+| `max_tokens` | 单次 LLM 输出 token 上限（默认 4000；范围 256–32768） | `4000` |
+| `writeback` | 关闭时只出报告；打开后才会改写描述/取消注册重复表情（true/false，默认 true） | `true` |
+| `enrich_description` | 是否给表情补「语气标签 + 适用场景」（true/false，默认 true） | `true` |
+| `similarity_threshold` | 描述相似度达到多少视为近似重复（默认 0.95；范围 0–1） | `0.95` |
+| `dedupe_unregister` | 近似重复表情是否取消注册（true/false，默认 true；保留更常用的那张） | `true` |
+| `max_unregister_per_run` | 单次最多取消注册多少张表情（默认 20；范围 0–500） | `20` |
+| `max_enrich_per_run` | 单次最多补写多少条表情描述（默认 300；范围 0–2000） | `300` |
+| `verification_rounds` | 多轮自证轮数（默认 2；范围 1–5；群内用法 + 联网检索） | `2` |
+| `verify_terms_per_run` | 单次最多对多少张表情做多轮自证（默认 15；范围 0–50） | `15` |
+| `group_usage_hours` | 自证时回看群内用法的时间窗口（小时，默认 720=30 天；范围 1–8760） | `720` |
+
+### 群友日程
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `enabled` | 是否启用群友日程（true/false，默认 true） | `true` |
+| `interval_minutes` | 扫描间隔（分钟，默认 60=每小时；范围 1–1440） | `60` |
+| `lookback_hours` | 每次回看最近多少小时的消息（小时，默认 3；范围 1–72） | `3` |
+| `max_streams` | 每轮最多扫几个群/私聊会话（默认 3；范围 1–20） | `3` |
+| `scan_private` | 私聊也扫描（true/false，默认 false=只扫群） | `false` |
+| `max_messages_per_stream` | 每个会话最多取多少条消息（默认 200；范围 20–2000） | `200` |
+| `max_events` | 注入上下文的日程条数上限（默认 5；范围 1–20） | `5` |
+| `llm_task` | 调用宿主哪个 LLM 任务（默认 utils；需与宿主模型配置里的任务名一致） | `utils` |
+| `max_tokens` | 单次调用最大输出 token（默认 4000；范围 256–32768） | `4000` |
+| `temperature` | 采样温度（默认 0.2；范围 0–2） | `0.2` |
+| `writeback` | 是否写回（true/false，默认 true；false=只出报告，dry-run，人物卡归档也会跳过） | `true` |
+| `archive_to_person` | 是否把结束的日程归档到宿主人物卡 PersonInfo.memory_points（true/false，默认 true；dry-run 时不写） | `true` |
+| `expire_hours` | 已确认事件过了时间多久视为结束（小时，默认 48；范围 1–720） | `48` |
+| `stale_days` | 已确认事件多少天没人再提就归档（天，默认 14；范围 1–365） | `14` |
+| `max_archive_per_run` | 每轮最多归档多少条（默认 10；范围 0–1000；0=不限制，超出顺延到下一轮；dry-run 不写人物卡、不受此限） | `10` |
+| `candidate_ttl_hours` | 待办候选最多保留多少小时，未确认就丢弃（小时，默认 72；范围 1–720） | `72` |
+| `confirm_min_hits` | 同一件事被提到几次才确认（默认 2；范围 1–20；模糊时间用） | `2` |
+| `exact_confirm_confidence` | 时间明确时，置信度达到多少可直接确认（默认 0.75；范围 0–1） | `0.75` |
+| `abstract_window_hours` | 「一会儿/之后」这类模糊时间的观察窗（小时，默认 24；范围 1–168） | `24` |
+| `relative_window_hours` | 「明天/周末」这类只有日期的观察窗（小时，默认 36；范围 1–336） | `36` |
+| `purge_closed_days` | 取消/丢弃的记录保留几天后删除（天，默认 3；范围 1–90） | `3` |
+| `purge_archived_days` | 归档记录保留几天后删除（天，默认 7；范围 1–365；人物卡记忆保留） | `7` |
+| `inject` | 是否在聊天请求前注入最近安排（true/false，默认 true） | `true` |
+
+### 上下文注入
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `enabled` | 注入总开关（true/false，默认 true） | `true` |
+| `in_planner` | planner 请求前注入（true/false，默认 true） | `true` |
+| `in_replyer` | replyer 请求前注入（true/false，默认 true） | `true` |
+| `agenda` | 注入最近安排（true/false，默认 true） | `true` |
+| `max_events` | 注入的日程条数上限（默认 5；范围 1–20） | `5` |
+| `max_chars` | 注入块总字数上限，超了截断（默认 420；范围 80–2000） | `420` |
 
 **注意**：在 WebUI 插件配置页点「保存」会按 schema 重写 `config.toml`，可能丢掉注释。想保留注释请直接编辑插件目录里的 `config.toml`（插件会自动热加载）；每次保存前 Runner 都会在插件目录的 `config_back/` 留备份，可从中找回。
 
@@ -59,7 +181,8 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 
 ## 版本记录
 
-- `v0.1.2`（2026-10-27）：按复审建议收尾——manifest 移除未使用的 `message.get_recent` 能力声明；修正 docstring 里“联网走宿主同一把 Key”的旧描述；修复开关「关闭再打开」后后台巡检不会自动重启的问题；单轮巡检异常不再终止整个循环。另外按自查清理：去掉文件头 BOM、移除 `urllib` 兜底（联网只用宿主自带的 `httpx`，缺失时优雅跳过并只警告一次）。第 3 轮复审补充：`[agenda] writeback = false`（dry-run）时不再写入人物卡（`archive_to_person` 保留为独立开关），使 dry-run 承诺与实现一致；同时校正 README 里联网依赖、宿主交互与配置表的描述。第 5 轮复审补充：`[agenda] max_archive_per_run` 现已真正生效（每轮最多写多少条人物卡归档，超出部分顺延到下一轮，0=不限制；dry-run 不写人物卡、不受此限），`[web] base_url` 字段描述注明仅建议填写可信的 API 地址。展示名英文副名由 MaiBot Curator 调整为 Memory Keeper（中文名与插件 id 不变）。
+- `v0.1.3`（2026-10-27）：按第 5 轮复审意见补强——`[agenda] max_archive_per_run` 真正生效（每轮最多写多少条人物卡归档，超出部分顺延到下一轮，0=不限制；dry-run 不写人物卡、不受此限），`[web] base_url` 字段描述注明仅建议填写可信的 API 地址；展示名英文副名由 MaiBot Curator 调整为 Memory Keeper（中文名与插件 id 不变）。README 开头新增一句自述；配置说明按 WebUI 面板顺序重写，逐项列出每个参数的含义与取值范围，所有配置字段描述都补上默认值/范围/示例，WebUI 未填写时会直接显示提示。
+- `v0.1.2`（2026-10-27）：按复审建议收尾——manifest 移除未使用的 `message.get_recent` 能力声明；修正 docstring 里“联网走宿主同一把 Key”的旧描述；修复开关「关闭再打开」后后台巡检不会自动重启的问题；单轮巡检异常不再终止整个循环。另外按自查清理：去掉文件头 BOM、移除 `urllib` 兜底（联网只用宿主自带的 `httpx`，缺失时优雅跳过并只警告一次）。第 3 轮复审补充：`[agenda] writeback = false`（dry-run）时不再写入人物卡（`archive_to_person` 保留为独立开关），使 dry-run 承诺与实现一致；同时校正 README 里联网依赖、宿主交互与配置表的描述。
 - `v0.1.1`（2026-10-27）：按市场审核意见修复——仓库不再包含 `config.toml`（改由 Runner 生成、加入 `.gitignore`）；移除对宿主 `config/model_config.toml` 的读取，联网检索改为只使用插件配置里的 `[web] api_key`；消息读取改用 SDK 官方 `message.get_by_time_in_chat`（不再依赖私有参数），并用 `BotPlatformAccount` 过滤 Bot 自己的发言；`clear_high_frequency_terms` 注明整表清空。
 - `v0.1.0`（2026-10-27）：首个公开版本。黑话/表达/表情三库清洗 + 群聊日程待办；多轮多源自证；全中文注释配置。
 

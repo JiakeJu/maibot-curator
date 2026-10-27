@@ -224,8 +224,8 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_icon__ = "package"
     __ui_order__ = 0
 
-    enabled: bool = Field(default=True, description="是否启用麦麦很好奇")
-    config_version: str = Field(default="0.1.2", description="配置版本")
+    enabled: bool = Field(default=True, description="插件总开关（true/false，默认 true；关闭后不再巡检，也不再注入上下文）")
+    config_version: str = Field(default="0.1.3", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
 
 
 class ScheduleConfig(PluginConfigBase):
@@ -235,9 +235,9 @@ class ScheduleConfig(PluginConfigBase):
     __ui_icon__ = "clock"
     __ui_order__ = 1
 
-    tick_minutes: int = Field(default=30, description="调度器检查间隔（分钟）")
-    run_on_load: bool = Field(default=True, description="插件加载后是否立刻执行一轮到期模块")
-    startup_delay_seconds: int = Field(default=90, description="加载后等待多少秒再开始首轮")
+    tick_minutes: int = Field(default=30, description="调度器多久检查一次到期模块（分钟，默认 30；范围 1–1440；例：30=每半小时检查一次）")
+    run_on_load: bool = Field(default=True, description="插件加载后是否立刻执行一轮到期模块（true/false，默认 true）")
+    startup_delay_seconds: int = Field(default=90, description="加载后等待多少秒再开始首轮巡检（秒，默认 90；范围 0–600）")
 
 
 class JargonConfig(PluginConfigBase):
@@ -247,21 +247,21 @@ class JargonConfig(PluginConfigBase):
     __ui_icon__ = "message-circle"
     __ui_order__ = 2
 
-    enabled: bool = Field(default=True, description="是否启用黑话学习模块")
-    interval_minutes: int = Field(default=360, description="黑话模块运行间隔（分钟），0 表示不自动运行")
-    batch_size: int = Field(default=6, description="每次请求 LLM 判定的候选词数量")
-    max_candidates: int = Field(default=30, description="单次最多处理的候选词数量")
-    min_count: int = Field(default=2, description="至少出现过多少次才进入候选")
-    evidence_lines: int = Field(default=12, description="每个词最多带多少条上下文证据")
-    llm_task: str = Field(default="utils", description="用于判定的 LLM 任务名")
-    max_tokens: int = Field(default=4000, description="单次 LLM 输出 token 上限")
-    temperature: float = Field(default=0.1, description="LLM 温度")
-    writeback: bool = Field(default=True, description="关闭时只出报告；打开后才会更新/删除黑话库")
-    min_confidence: float = Field(default=0.6, description="低于该置信度的判定不写回")
-    delete_rejected: bool = Field(default=True, description="把判定为常见词/无意义的候选从黑话库删除")
-    clear_high_frequency_terms: bool = Field(default=False, description="写回成功时清空高频词表（整表清空、不可恢复；仅影响黑话匹配打分，一般保持关闭）")
-    max_writes_per_run: int = Field(default=40, description="单次最多写回多少条黑话")
-    group_usage_hours: int = Field(default=336, description="自证时回看群内用法的时间窗口（小时）")
+    enabled: bool = Field(default=True, description="是否启用黑话学习模块（true/false，默认 true）")
+    interval_minutes: int = Field(default=360, description="黑话模块运行间隔（分钟，默认 360=6 小时；范围 0–43200；0=不自动运行）")
+    batch_size: int = Field(default=6, description="每次交给 LLM 判定的候选词数量（默认 6；范围 1–50）")
+    max_candidates: int = Field(default=30, description="单次最多处理多少个候选词（默认 30；范围 1–500）")
+    min_count: int = Field(default=2, description="一个词至少出现过多少次才进入候选（默认 2；范围 1–100）")
+    evidence_lines: int = Field(default=12, description="每个候选词最多带多少条上下文证据（默认 12；范围 1–50）")
+    llm_task: str = Field(default="utils", description="调用宿主哪个 LLM 任务（默认 utils；示例：utils / chat，需与宿主模型配置里的任务名一致）")
+    max_tokens: int = Field(default=4000, description="单次 LLM 输出 token 上限（默认 4000；范围 256–32768）")
+    temperature: float = Field(default=0.1, description="LLM 采样温度（默认 0.1；范围 0–2；越低越保守）")
+    writeback: bool = Field(default=True, description="关闭时只出报告；打开后才会更新/删除黑话库（true/false，默认 true；首次建议先 false 观察报告）")
+    min_confidence: float = Field(default=0.6, description="低于该置信度的判定不写回（默认 0.6；范围 0–1；例：0.6=置信度 60% 以上才写）")
+    delete_rejected: bool = Field(default=True, description="把判定为常见词/无意义的候选从黑话库删除（true/false，默认 true）")
+    clear_high_frequency_terms: bool = Field(default=False, description="写回成功时清空高频词表（整表清空、不可恢复；只影响黑话匹配打分，一般保持关闭；true/false，默认 false）")
+    max_writes_per_run: int = Field(default=40, description="单次最多写回多少条黑话（默认 40；范围 0–1000；0=不写回）")
+    group_usage_hours: int = Field(default=336, description="自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760）")
 
 
 class WebSearchConfig(PluginConfigBase):
@@ -275,17 +275,17 @@ class WebSearchConfig(PluginConfigBase):
     __ui_icon__ = "globe"
     __ui_order__ = 3
 
-    enabled: bool = Field(default=True, description="联网检索总开关（未填写 api_key 时即使开启也只使用群内证据）")
-    api_key: str = Field(default="", description="DeepSeek API Key（联网检索自证用，请在 platform.deepseek.com 自行申请；留空=不联网）")
-    base_url: str = Field(default="", description="DeepSeek API 地址，留空使用默认 https://api.deepseek.com（仅建议填写可信的 API 地址）")
-    timeout_seconds: int = Field(default=25, description="单次联网请求超时（秒）")
-    per_term_results: int = Field(default=3, description="每个词最多取几条搜索结果")
-    max_searches_per_run: int = Field(default=6, description="单次巡检最多联网检索多少个词")
-    fetch_top_page: bool = Field(default=True, description="是否抓取排名第一结果的正文字摘要")
-    cache_ttl_hours: int = Field(default=720, description="检索结果缓存时长（小时），避免重复花费")
-    verification_rounds: int = Field(default=2, description="多轮自证轮数（2-3 轮，各轮结果一致才固定含义）")
-    verify_terms_per_run: int = Field(default=4, description="单次最多对多少个词做多轮自证")
-    verify_max_attempts: int = Field(default=3, description="单个词最多自证几次，超过则放弃，避免无限花 token")
+    enabled: bool = Field(default=True, description="联网检索总开关（true/false，默认 true；未填写 api_key 时即使开启也只使用群内证据）")
+    api_key: str = Field(default="", description="DeepSeek API Key，联网检索自证用（示例：sk-xxxx；在 platform.deepseek.com 自行申请；留空=不联网，只用群内证据）")
+    base_url: str = Field(default="", description="DeepSeek API 地址（留空=默认 https://api.deepseek.com；仅建议填写可信的 API 地址）")
+    timeout_seconds: int = Field(default=25, description="单次联网请求超时（秒，默认 25；范围 1–120）")
+    per_term_results: int = Field(default=3, description="每个词最多取几条搜索结果（默认 3；范围 1–10）")
+    max_searches_per_run: int = Field(default=6, description="单次巡检最多联网检索多少个词（默认 6；范围 0–50）")
+    fetch_top_page: bool = Field(default=True, description="是否抓取排名第一结果的正文字摘要（true/false，默认 true）")
+    cache_ttl_hours: int = Field(default=720, description="检索结果缓存时长（小时，默认 720=30 天；范围 1–8760；避免重复花费）")
+    verification_rounds: int = Field(default=2, description="多轮自证轮数（默认 2；范围 1–5；各轮结果一致才固定含义）")
+    verify_terms_per_run: int = Field(default=4, description="单次最多对多少个词做多轮自证（默认 4；范围 0–50）")
+    verify_max_attempts: int = Field(default=3, description="单个词最多自证几次，超过就放弃（默认 3；范围 1–10；避免无限花 token）")
 
 
 class ExpressionConfig(PluginConfigBase):
@@ -295,21 +295,21 @@ class ExpressionConfig(PluginConfigBase):
     __ui_icon__ = "quote"
     __ui_order__ = 4
 
-    enabled: bool = Field(default=True, description="是否启用表达方式优化模块")
-    interval_minutes: int = Field(default=10080, description="表达模块运行间隔（分钟），0 表示不自动运行")
-    batch_size: int = Field(default=20, description="每次请求 LLM 处理的表达条数（40 易触发 max_output_tokens 截断，20 更稳）")
-    max_rows: int = Field(default=120, description="单次最多扫描多少条 AI 学习表达")
-    llm_task: str = Field(default="utils", description="用于表达的 LLM 任务名")
-    max_tokens: int = Field(default=4000, description="单次 LLM 输出 token 上限")
-    similarity_threshold: float = Field(default=0.92, description="embedding 相似度达到多少视为重复并合并")
-    writeback: bool = Field(default=True, description="关闭时只出报告；打开后才会合并/改写/删除表达")
-    delete_meaningless: bool = Field(default=True, description="是否删除判定为无意义的表达")
-    min_confidence: float = Field(default=0.65, description="低于该置信度的判定不写回")
-    max_writes_per_run: int = Field(default=200, description="单次最多写回多少条表达")
-    auto_check: bool = Field(default=False, description="是否把高置信表达自动标记为可注入（默认仍由人工勾选）")
-    verification_rounds: int = Field(default=2, description="多轮自证轮数（2-3 轮：群内用法 + 联网检索）")
-    verify_terms_per_run: int = Field(default=8, description="单次最多对多少条表达做多轮自证")
-    group_usage_hours: int = Field(default=336, description="自证时回看群内用法的时间窗口（小时）")
+    enabled: bool = Field(default=True, description="是否启用表达方式优化模块（true/false，默认 true）")
+    interval_minutes: int = Field(default=10080, description="表达模块运行间隔（分钟，默认 10080=7 天；范围 0–525600；0=不自动运行）")
+    batch_size: int = Field(default=20, description="每次交给 LLM 处理的表达条数（默认 20；范围 1–40；40 易触发输出截断，20 更稳）")
+    max_rows: int = Field(default=120, description="单次最多扫描多少条 AI 学习表达（默认 120；范围 1–1000）")
+    llm_task: str = Field(default="utils", description="调用宿主哪个 LLM 任务（默认 utils；需与宿主模型配置里的任务名一致）")
+    max_tokens: int = Field(default=4000, description="单次 LLM 输出 token 上限（默认 4000；范围 256–32768）")
+    similarity_threshold: float = Field(default=0.92, description="embedding 相似度达到多少视为重复并合并（默认 0.92；范围 0–1）")
+    writeback: bool = Field(default=True, description="关闭时只出报告；打开后才会合并/改写/删除表达（true/false，默认 true）")
+    delete_meaningless: bool = Field(default=True, description="是否删除判定为无意义的表达（true/false，默认 true）")
+    min_confidence: float = Field(default=0.65, description="低于该置信度的判定不写回（默认 0.65；范围 0–1）")
+    max_writes_per_run: int = Field(default=200, description="单次最多写回多少条表达（默认 200；范围 0–2000）")
+    auto_check: bool = Field(default=False, description="是否把高置信表达自动标记为可注入（true/false，默认 false；仍建议人工勾选）")
+    verification_rounds: int = Field(default=2, description="多轮自证轮数（默认 2；范围 1–5；群内用法 + 联网检索）")
+    verify_terms_per_run: int = Field(default=8, description="单次最多对多少条表达做多轮自证（默认 8；范围 0–50）")
+    group_usage_hours: int = Field(default=336, description="自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760）")
 
 
 class EmojiConfig(PluginConfigBase):
@@ -319,21 +319,21 @@ class EmojiConfig(PluginConfigBase):
     __ui_icon__ = "smile"
     __ui_order__ = 5
 
-    enabled: bool = Field(default=True, description="是否启用表情包库优化模块")
-    interval_minutes: int = Field(default=43200, description="表情模块运行间隔（分钟），0 表示不自动运行")
-    batch_size: int = Field(default=8, description="每次请求 LLM 处理的表情数量")
-    max_emoji: int = Field(default=300, description="单次最多处理多少张已注册表情")
-    llm_task: str = Field(default="utils", description="用于表情描述的 LLM 任务名")
-    max_tokens: int = Field(default=4000, description="单次 LLM 输出 token 上限")
-    writeback: bool = Field(default=True, description="关闭时只出报告；打开后才会改写描述/取消注册重复表情")
-    enrich_description: bool = Field(default=True, description="是否给表情补「语气标签 + 适用场景」")
-    similarity_threshold: float = Field(default=0.95, description="描述相似度达到多少视为近似重复")
-    dedupe_unregister: bool = Field(default=True, description="近似重复表情是否取消注册（保留更常用的那张）")
-    max_unregister_per_run: int = Field(default=20, description="单次最多取消注册多少张表情")
-    max_enrich_per_run: int = Field(default=300, description="单次最多补写多少条表情描述")
-    verification_rounds: int = Field(default=2, description="多轮自证轮数（2-3 轮：群内用法 + 联网检索）")
-    verify_terms_per_run: int = Field(default=15, description="单次最多对多少张表情做多轮自证")
-    group_usage_hours: int = Field(default=720, description="自证时回看群内用法的时间窗口（小时）")
+    enabled: bool = Field(default=True, description="是否启用表情包库优化模块（true/false，默认 true）")
+    interval_minutes: int = Field(default=43200, description="表情模块运行间隔（分钟，默认 43200=30 天；范围 0–525600；0=不自动运行）")
+    batch_size: int = Field(default=8, description="每次交给 LLM 处理的表情数量（默认 8；范围 1–40）")
+    max_emoji: int = Field(default=300, description="单次最多处理多少张已注册表情（默认 300；范围 1–2000）")
+    llm_task: str = Field(default="utils", description="调用宿主哪个 LLM 任务（默认 utils；需与宿主模型配置里的任务名一致）")
+    max_tokens: int = Field(default=4000, description="单次 LLM 输出 token 上限（默认 4000；范围 256–32768）")
+    writeback: bool = Field(default=True, description="关闭时只出报告；打开后才会改写描述/取消注册重复表情（true/false，默认 true）")
+    enrich_description: bool = Field(default=True, description="是否给表情补「语气标签 + 适用场景」（true/false，默认 true）")
+    similarity_threshold: float = Field(default=0.95, description="描述相似度达到多少视为近似重复（默认 0.95；范围 0–1）")
+    dedupe_unregister: bool = Field(default=True, description="近似重复表情是否取消注册（true/false，默认 true；保留更常用的那张）")
+    max_unregister_per_run: int = Field(default=20, description="单次最多取消注册多少张表情（默认 20；范围 0–500）")
+    max_enrich_per_run: int = Field(default=300, description="单次最多补写多少条表情描述（默认 300；范围 0–2000）")
+    verification_rounds: int = Field(default=2, description="多轮自证轮数（默认 2；范围 1–5；群内用法 + 联网检索）")
+    verify_terms_per_run: int = Field(default=15, description="单次最多对多少张表情做多轮自证（默认 15；范围 0–50）")
+    group_usage_hours: int = Field(default=720, description="自证时回看群内用法的时间窗口（小时，默认 720=30 天；范围 1–8760）")
 
 
 class AgendaConfig(PluginConfigBase):
@@ -343,29 +343,29 @@ class AgendaConfig(PluginConfigBase):
     __ui_icon__ = "calendar"
     __ui_order__ = 7
 
-    enabled: bool = Field(default=True, description="是否启用群友日程")
-    interval_minutes: int = Field(default=60, description="扫描间隔（分钟），默认每小时")
-    lookback_hours: int = Field(default=3, description="每次回看最近多少小时的消息")
-    max_streams: int = Field(default=3, description="每轮最多扫几个群")
-    scan_private: bool = Field(default=False, description="私聊也扫（默认只扫群）")
-    max_messages_per_stream: int = Field(default=200, description="每个群最多取多少条消息")
-    max_events: int = Field(default=5, description="注入上下文的日程条数上限")
-    llm_task: str = Field(default="utils", description="使用的模型任务名")
-    max_tokens: int = Field(default=4000, description="单次调用最大输出 token")
-    temperature: float = Field(default=0.2, description="采样温度")
-    writeback: bool = Field(default=True, description="是否写回（false=只出报告，dry-run；人物卡归档也会跳过）")
-    archive_to_person: bool = Field(default=True, description="归档到宿主 PersonInfo.memory_points（dry-run 时不写）")
-    expire_hours: int = Field(default=48, description="已确认事件过了时间多久视为结束（小时）")
-    stale_days: int = Field(default=14, description="已确认事件多少天没人再提就归档")
-    max_archive_per_run: int = Field(default=10, description="每轮最多归档多少条（0=不限制；dry-run 不写人物卡，不受此限）")
-    candidate_ttl_hours: int = Field(default=72, description="待办候选最多保留多少小时（未确认就丢弃）")
-    confirm_min_hits: int = Field(default=2, description="被提到几次才确认（模糊时间用）")
-    exact_confirm_confidence: float = Field(default=0.75, description="时间明确时，置信度多少可直接确认")
-    abstract_window_hours: int = Field(default=24, description="“一会儿/之后”这类模糊时间的观察窗（小时）")
-    relative_window_hours: int = Field(default=36, description="“明天/周末”这类只有日期的观察窗（小时）")
-    purge_closed_days: int = Field(default=3, description="取消/丢弃的记录保留几天后删除")
-    purge_archived_days: int = Field(default=7, description="归档记录保留几天后删除（人物卡记忆保留）")
-    inject: bool = Field(default=True, description="是否在聊天请求前注入最近安排")
+    enabled: bool = Field(default=True, description="是否启用群友日程（true/false，默认 true）")
+    interval_minutes: int = Field(default=60, description="扫描间隔（分钟，默认 60=每小时；范围 1–1440）")
+    lookback_hours: int = Field(default=3, description="每次回看最近多少小时的消息（小时，默认 3；范围 1–72）")
+    max_streams: int = Field(default=3, description="每轮最多扫几个群/私聊会话（默认 3；范围 1–20）")
+    scan_private: bool = Field(default=False, description="私聊也扫描（true/false，默认 false=只扫群）")
+    max_messages_per_stream: int = Field(default=200, description="每个会话最多取多少条消息（默认 200；范围 20–2000）")
+    max_events: int = Field(default=5, description="注入上下文的日程条数上限（默认 5；范围 1–20）")
+    llm_task: str = Field(default="utils", description="调用宿主哪个 LLM 任务（默认 utils；需与宿主模型配置里的任务名一致）")
+    max_tokens: int = Field(default=4000, description="单次调用最大输出 token（默认 4000；范围 256–32768）")
+    temperature: float = Field(default=0.2, description="采样温度（默认 0.2；范围 0–2）")
+    writeback: bool = Field(default=True, description="是否写回（true/false，默认 true；false=只出报告，dry-run，人物卡归档也会跳过）")
+    archive_to_person: bool = Field(default=True, description="是否把结束的日程归档到宿主人物卡 PersonInfo.memory_points（true/false，默认 true；dry-run 时不写）")
+    expire_hours: int = Field(default=48, description="已确认事件过了时间多久视为结束（小时，默认 48；范围 1–720）")
+    stale_days: int = Field(default=14, description="已确认事件多少天没人再提就归档（天，默认 14；范围 1–365）")
+    max_archive_per_run: int = Field(default=10, description="每轮最多归档多少条（默认 10；范围 0–1000；0=不限制，超出顺延到下一轮；dry-run 不写人物卡、不受此限）")
+    candidate_ttl_hours: int = Field(default=72, description="待办候选最多保留多少小时，未确认就丢弃（小时，默认 72；范围 1–720）")
+    confirm_min_hits: int = Field(default=2, description="同一件事被提到几次才确认（默认 2；范围 1–20；模糊时间用）")
+    exact_confirm_confidence: float = Field(default=0.75, description="时间明确时，置信度达到多少可直接确认（默认 0.75；范围 0–1）")
+    abstract_window_hours: int = Field(default=24, description="「一会儿/之后」这类模糊时间的观察窗（小时，默认 24；范围 1–168）")
+    relative_window_hours: int = Field(default=36, description="「明天/周末」这类只有日期的观察窗（小时，默认 36；范围 1–336）")
+    purge_closed_days: int = Field(default=3, description="取消/丢弃的记录保留几天后删除（天，默认 3；范围 1–90）")
+    purge_archived_days: int = Field(default=7, description="归档记录保留几天后删除（天，默认 7；范围 1–365；人物卡记忆保留）")
+    inject: bool = Field(default=True, description="是否在聊天请求前注入最近安排（true/false，默认 true）")
 
 
 class InjectConfig(PluginConfigBase):
@@ -375,12 +375,12 @@ class InjectConfig(PluginConfigBase):
     __ui_icon__ = "message-square"
     __ui_order__ = 8
 
-    enabled: bool = Field(default=True, description="总开关")
-    in_planner: bool = Field(default=True, description="planner 请求前注入")
-    in_replyer: bool = Field(default=True, description="replyer 请求前注入")
-    agenda: bool = Field(default=True, description="注入最近安排")
-    max_events: int = Field(default=5, description="注入的日程条数上限")
-    max_chars: int = Field(default=420, description="注入块总字数上限（超了截断）")
+    enabled: bool = Field(default=True, description="注入总开关（true/false，默认 true）")
+    in_planner: bool = Field(default=True, description="planner 请求前注入（true/false，默认 true）")
+    in_replyer: bool = Field(default=True, description="replyer 请求前注入（true/false，默认 true）")
+    agenda: bool = Field(default=True, description="注入最近安排（true/false，默认 true）")
+    max_events: int = Field(default=5, description="注入的日程条数上限（默认 5；范围 1–20）")
+    max_chars: int = Field(default=420, description="注入块总字数上限，超了截断（默认 420；范围 80–2000）")
 
 
 class LearningKeeperPluginConfig(PluginConfigBase):
