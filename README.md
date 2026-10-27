@@ -1,4 +1,4 @@
-# 麦麦很好奇（MaiBot Curator）
+# 麦麦很好奇（Memory Keeper）
 
 让麦麦自己整理自己的「记忆库」：黑话、表达方式、表情包三套内置数据，加上一份群友日程待办。
 
@@ -41,6 +41,7 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 | `[agenda] archive_to_person` | 是否把结束的日程归档到宿主人物卡 `PersonInfo.memory_points`（dry-run 时不写） | `true` |
 | `[agenda] confirm_min_hits` | 同一件事被提到几次才算确认 | `2` |
 | `[agenda] abstract_window_hours` | 「一会儿/之后」类安排的观察窗 | `24` |
+| `[agenda] max_archive_per_run` | 每轮最多归档多少条（0=不限制；超出顺延到下一轮；dry-run 不写人物卡、不受此限） | `10` |
 | `[inject] max_chars` | 注入上下文的最大字数 | `420` |
 | `[web] api_key` | 联网检索用的 DeepSeek API Key（[platform.deepseek.com](https://platform.deepseek.com) 自行申请）；留空则**只使用群内证据**，不联网 | `""` |
 
@@ -58,7 +59,7 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 
 ## 版本记录
 
-- `v0.1.2`（2026-10-27）：按复审建议收尾——manifest 移除未使用的 `message.get_recent` 能力声明；修正 docstring 里“联网走宿主同一把 Key”的旧描述；修复开关「关闭再打开」后后台巡检不会自动重启的问题；单轮巡检异常不再终止整个循环。另外按自查清理：去掉文件头 BOM、移除 `urllib` 兜底（联网只用宿主自带的 `httpx`，缺失时优雅跳过并只警告一次）。第 3 轮复审补充：`[agenda] writeback = false`（dry-run）时不再写入人物卡（`archive_to_person` 保留为独立开关），使 dry-run 承诺与实现一致；同时校正 README 里联网依赖、宿主交互与配置表的描述。
+- `v0.1.2`（2026-10-27）：按复审建议收尾——manifest 移除未使用的 `message.get_recent` 能力声明；修正 docstring 里“联网走宿主同一把 Key”的旧描述；修复开关「关闭再打开」后后台巡检不会自动重启的问题；单轮巡检异常不再终止整个循环。另外按自查清理：去掉文件头 BOM、移除 `urllib` 兜底（联网只用宿主自带的 `httpx`，缺失时优雅跳过并只警告一次）。第 3 轮复审补充：`[agenda] writeback = false`（dry-run）时不再写入人物卡（`archive_to_person` 保留为独立开关），使 dry-run 承诺与实现一致；同时校正 README 里联网依赖、宿主交互与配置表的描述。第 5 轮复审补充：`[agenda] max_archive_per_run` 现已真正生效（每轮最多写多少条人物卡归档，超出部分顺延到下一轮，0=不限制；dry-run 不写人物卡、不受此限），`[web] base_url` 字段描述注明仅建议填写可信的 API 地址。展示名英文副名由 MaiBot Curator 调整为 Memory Keeper（中文名与插件 id 不变）。
 - `v0.1.1`（2026-10-27）：按市场审核意见修复——仓库不再包含 `config.toml`（改由 Runner 生成、加入 `.gitignore`）；移除对宿主 `config/model_config.toml` 的读取，联网检索改为只使用插件配置里的 `[web] api_key`；消息读取改用 SDK 官方 `message.get_by_time_in_chat`（不再依赖私有参数），并用 `BotPlatformAccount` 过滤 Bot 自己的发言；`clear_high_frequency_terms` 注明整表清空。
 - `v0.1.0`（2026-10-27）：首个公开版本。黑话/表达/表情三库清洗 + 群聊日程待办；多轮多源自证；全中文注释配置。
 

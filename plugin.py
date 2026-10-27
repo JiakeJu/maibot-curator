@@ -56,7 +56,7 @@
 
 == 设计原则 ==
   - 全部通过宿主 capability（database/llm/message/chat）访问，不直接 import 宿主内部模块；
-  - 写库前先出报告，所有写回都有 max_writes_per_run 上限；
+  - 写库前先出报告，所有写回都有上限：黑话/表达/表情用 max_writes_per_run，日程归档用 max_archive_per_run；
   - 联网只使用插件自己配置的 [web] api_key（留空=不联网），检索结果命中缓存后复用，避免重复花费；
   - 任何一个模块出错只记录到 errors，不影响其他模块。
 """
@@ -277,7 +277,7 @@ class WebSearchConfig(PluginConfigBase):
 
     enabled: bool = Field(default=True, description="联网检索总开关（未填写 api_key 时即使开启也只使用群内证据）")
     api_key: str = Field(default="", description="DeepSeek API Key（联网检索自证用，请在 platform.deepseek.com 自行申请；留空=不联网）")
-    base_url: str = Field(default="", description="DeepSeek API 地址，留空使用默认 https://api.deepseek.com")
+    base_url: str = Field(default="", description="DeepSeek API 地址，留空使用默认 https://api.deepseek.com（仅建议填写可信的 API 地址）")
     timeout_seconds: int = Field(default=25, description="单次联网请求超时（秒）")
     per_term_results: int = Field(default=3, description="每个词最多取几条搜索结果")
     max_searches_per_run: int = Field(default=6, description="单次巡检最多联网检索多少个词")
@@ -357,7 +357,7 @@ class AgendaConfig(PluginConfigBase):
     archive_to_person: bool = Field(default=True, description="归档到宿主 PersonInfo.memory_points（dry-run 时不写）")
     expire_hours: int = Field(default=48, description="已确认事件过了时间多久视为结束（小时）")
     stale_days: int = Field(default=14, description="已确认事件多少天没人再提就归档")
-    max_archive_per_run: int = Field(default=10, description="每轮最多归档多少条")
+    max_archive_per_run: int = Field(default=10, description="每轮最多归档多少条（0=不限制；dry-run 不写人物卡，不受此限）")
     candidate_ttl_hours: int = Field(default=72, description="待办候选最多保留多少小时（未确认就丢弃）")
     confirm_min_hits: int = Field(default=2, description="被提到几次才确认（模糊时间用）")
     exact_confirm_confidence: float = Field(default=0.75, description="时间明确时，置信度多少可直接确认")
@@ -2554,6 +2554,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "cancelled": 0,
             "dropped": 0,
             "archived": 0,
+            "deferred": 0,
             "purged": 0,
             "errors": [],
             "summary": "",
@@ -2584,6 +2585,20 @@ class LearningKeeperPlugin(MaiBotPlugin):
         result["scanned"] = len(lines)
         events = self._agenda_events()
         now = time.time()
+        archive_cap = max(0, _as_int(cfg.max_archive_per_run))
+        archived_this_run = 0
+
+        async def try_archive(event: Dict[str, Any], kind_label: str) -> bool:
+            """归档入口：按 [agenda] max_archive_per_run 限制每轮实际写人物卡的条数。"""
+            nonlocal archived_this_run
+            if not dry_run and archive_cap > 0 and archived_this_run >= archive_cap:
+                result["deferred"] += 1
+                return False
+            ok = await self._agenda_archive(event, now, kind_label=kind_label, dry_run=dry_run)
+            if ok:
+                archived_this_run += 1
+            return ok
+
         # 兼容旧版本：以前的 active 全部视为已确认，之后按新状态机处理
         for event in events:
             if isinstance(event, dict) and _text(event.get("status")) == "active":
@@ -2691,7 +2706,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     known.append(target)
                 target["status"] = "confirmed"
                 target["confirmed_ts"] = now
-                if await self._agenda_archive(target, now, kind_label="已完成", dry_run=dry_run):
+                if await try_archive(target, "已完成"):
                     result["archived"] += 1
                 result["done"] += 1
                 continue
@@ -2736,10 +2751,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
             last = _as_float(event.get("last_mentioned_ts") or event.get("created_ts"))
             if status == "confirmed":
                 if due and now > due + float(cfg.expire_hours) * 3600:
-                    if await self._agenda_archive(event, now, kind_label="已结束", dry_run=dry_run):
+                    if await try_archive(event, "已结束"):
                         result["archived"] += 1
                 elif now - last > float(cfg.stale_days) * 86400:
-                    if await self._agenda_archive(event, now, kind_label="已结束", dry_run=dry_run):
+                    if await try_archive(event, "已结束"):
                         result["archived"] += 1
             elif status == "pending":
                 resolve_by = _as_float(event.get("resolve_by"))
@@ -2760,6 +2775,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
             f"丢弃 {result['dropped']}，归档 {result['archived']}，清理 {result['purged']}"
             f"（{'只报告，未写人物卡' if dry_run else '已写回'}）"
         )
+        if result["deferred"]:
+            result["summary"] += (
+                f"（归档上限 {archive_cap} 条/轮，{result['deferred']} 条顺延到下一轮）"
+            )
         result["events"] = [
             {
                 "who": _text(event.get("person_name")),
