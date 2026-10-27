@@ -1,0 +1,161 @@
+# ============================================================================
+# 麦麦很好奇（Learning Keeper）插件配置
+# ----------------------------------------------------------------------------
+# 这个插件不参与聊天，只在后台按间隔巡检三项「学习结果库」并做清洗/补全：
+#   黑话（jargons） / 表达方式（expressions） / 表情包（images，EMOJI）
+#   另含「群友日程」模块：每小时扫群聊抽短期安排，确认后才允许提及。
+#
+# 改完这个文件会被自动热加载，不需要重启；想立刻重跑某模块见文末「手动触发」。
+# 所有写回动作都受各自 max_writes_per_run 限制，关掉 writeback 就只出报告。
+# ============================================================================
+
+# ---------------------------- 插件总开关 -----------------------------------
+[plugin]
+enabled = true                # 总开关：false 时整个插件不加载
+config_version = "0.1.0"      # 配置版本，由插件自己维护，一般不要改（改了可能触发配置迁移）
+
+# ---------------------------- 调度 ----------------------------------------
+# 插件内部有一个调度器：每 tick_minutes 检查一次有没有模块到期。
+# 三个模块各自有 interval_minutes，到期才真正跑（不是每个 tick 都跑）。
+[schedule]
+tick_minutes = 30             # 调度器检查间隔（分钟），改大=更省，但模块到期后会晚一点才跑
+run_on_load = true            # 插件加载后，是否立刻补跑一次「到期」模块（首次安装建议 true）
+startup_delay_seconds = 90    # 加载后等多少秒再开始首轮，避免和宿主启动抢资源/抢 LLM 配额
+
+# ---------------------------- 黑话模块 -------------------------------------
+# 干什么：找出「群内反复出现、但库里没有含义」的词，结合群聊上下文 + 联网检索，
+#         生成一条中文释义写进 jargons 表（is_jargon=1、is_complete=1）。
+# 写回后宿主会在 planner 的上下文里带最多 10 条「词 → 含义」参考，帮助 bot 理解聊天。
+[jargon]
+enabled = true                # 是否启用黑话模块
+interval_minutes = 360        # 运行间隔（分钟）：360 = 6 小时一次；0 = 不自动跑（仍可手动 run_now）
+batch_size = 6                # 每次 LLM 请求判定几个候选词（6 个约 3~5k prompt token）
+max_candidates = 30           # 单次巡检最多挑多少候选（挑 count 最高的）
+min_count = 2                 # 词在聊天里至少出现几次才值得学（出现 1 次的碎片噪音不处理）
+evidence_lines = 12           # 每个词最多带多少条"聊天上下文"给模型看（越多越准、越贵）
+llm_task = "utils"            # 用宿主哪个 LLM 任务：utils（便宜档），也可换 replyer/planner 任务名
+max_tokens = 4000             # 单次输出上限；太小会被截断（截断会记 error 并跳过该批）
+temperature = 0.1             # 越低越稳定，判定类任务建议 0.1 左右
+writeback = true              # 总出口：false = 只写报告不改库（首次观察请先 false 跑一轮）
+min_confidence = 0.6          # 低于此置信度的结论不写回（想更严格可提到 0.7~0.8）
+delete_rejected = true        # 判定为"常见词/无意义"时，是否从库里删掉（不想删就 false）
+clear_high_frequency_terms = false   # 写回时是否清空高频词表（只影响黑话匹配打分，一般 false）
+max_writes_per_run = 40       # 单次最多写回几条，防止一口气改太多
+group_usage_hours = 336       # 自证时回看群内用法的时间窗口：336h = 14 天
+
+# ---------------------------- 联网检索 -------------------------------------
+# 三个模块的「自证」共用这一段：用 DeepSeek 的 /v1/tools/search 查词义/梗出处。
+# 想省钱就调小 max_searches_per_run / verify_terms_per_run / 缩短 cache_ttl_hours。
+[web]
+enabled = true                # false = 完全跳过联网，只用群内证据（自证能力会变弱）
+api_key = ""                  # 留空=自动读宿主 config/model_config.toml 里 [web.services.*] 的 DeepSeek Key
+base_url = ""                 # 留空=同上读取 base_url（一般 https://api.deepseek.com）
+timeout_seconds = 25          # 单次检索请求超时
+per_term_results = 3          # 每个词取几条搜索结果（拼进 prompt）
+max_searches_per_run = 6      # 单次巡检最多发几次检索请求（黑话模块用）
+fetch_top_page = true         # 是否再抓第一条结果的正文摘要（更准，多花 1 次请求）
+cache_ttl_hours = 720         # 检索结果缓存时长：720h=30 天，同一词 30 天内不重复花钱
+verification_rounds = 2       # 自证轮数：2~3，用不同问法问；各轮结论一致才算 agree
+verify_terms_per_run = 4      # 黑话单次最多对几个词做多轮自证（和 max_searches_per_run 取小）
+verify_max_attempts = 3       # 一个词最多自证 3 次；仍不一致就放弃并标记完成，避免无限烧 token
+
+# ---------------------------- 表达方式模块 ---------------------------------
+# 干什么：宿主会在聊天里自动"学习"表达方式（AI 生成、默认未勾选）。这个模块
+#         定期把它去重、改写情景、删掉无意义碎片，并给高置信条目出建议。
+# 注意：只有 checked=1 的表达会真正注入 replyer；本插件默认不改勾选（auto_check=false）。
+[expression]
+enabled = true                # 是否启用表达模块
+interval_minutes = 10080      # 运行间隔（分钟）：10080 = 7 天一次（表达库变化慢，不用太勤）
+batch_size = 20               # 每次 LLM 处理几条；40 会容易触发 max_output_tokens 截断，20 稳妥
+max_rows = 120                # 单次最多扫描多少条 AI 学习表达（库大时可调大，但更费 token）
+llm_task = "utils"            # 判定用的 LLM 任务
+max_tokens = 4000             # 单次输出上限
+similarity_threshold = 0.92   # embedding 余弦 ≥0.92 视为重复表达，合并保留更常用的
+writeback = true              # false = 只出报告
+delete_meaningless = true     # 是否删除判定为"无意义"的表达（如纯符号、纯语气词、断句碎片）
+min_confidence = 0.65         # 删除/改写的置信度门槛
+max_writes_per_run = 200      # 单次最多写回条数
+auto_check = false            # true = 高置信表达自动勾选进注入（默认 false，仍由你在 WebUI 勾选）
+verification_rounds = 2       # 自证轮数（群内用法 + 联网检索一致才锁定）
+verify_terms_per_run = 8      # 单次最多对几条表达做自证
+group_usage_hours = 336       # 自证时回看群内用法的时间窗口（小时）
+
+# ---------------------------- 表情包模块 -----------------------------------
+# 干什么：给已注册表情补「画面描述｜标签｜适用场景」，并按描述相似度合并近似重复
+#         （保留更常用的、取消注册其余）。不改变宿主"随机挑表情"的选图逻辑。
+[emoji]
+enabled = true                # 是否启用表情模块
+interval_minutes = 43200      # 运行间隔（分钟）：43200 = 30 天一次（表情库变化很慢）
+batch_size = 8                # 每次 LLM 处理几张（表情描述较长，8 张约 3k token）
+max_emoji = 300               # 单次最多处理多少张已注册表情
+llm_task = "utils"            # 描述生成用的 LLM 任务
+max_tokens = 4000             # 单次输出上限
+writeback = true              # false = 只出报告
+enrich_description = true     # 是否补写「画面描述｜标签：…；场景：…」格式描述
+similarity_threshold = 0.95   # 描述相似度 ≥0.95 视为近似重复（同图不同压缩/裁切）
+dedupe_unregister = true      # 近似重复时是否取消注册（取消注册=退出发送候选池，不删文件）
+max_unregister_per_run = 20   # 单次最多取消注册多少张
+max_enrich_per_run = 300      # 单次最多补写多少条描述
+verification_rounds = 2       # 自证轮数（群内真实使用情况 + 联网标签一致才锁定）
+verify_terms_per_run = 15     # 单次最多对多少张表情做自证
+group_usage_hours = 720       # 自证时回看群内用法的时间窗口：720h = 30 天
+
+# ============================================================================
+# 手动触发（不改配置文件）
+# ----------------------------------------------------------------------------
+# 方式一：WebUI 插件页 →「麦麦很好奇」→ 运行一次（调用 @API run_now）
+# 方式二：把 data/plugins/local.jargon-keeper/state.json 里对应模块的
+#         *_last_run_ts 改成 0，然后重启 MaiBot（三个模块都会重新到期）
+# 方式三：外部调用 /api/webui/plugins/... 对应接口（需 maibot_session Cookie）
+#
+# 运行结果看这里：
+#   data/plugins/local.jargon-keeper/last_report.json              最近一轮汇总
+#   data/plugins/local.jargon-keeper/last_report_jargon.json       黑话明细
+#   data/plugins/local.jargon-keeper/last_report_expression.json   表达明细
+#   data/plugins/local.jargon-keeper/last_report_emoji.json        表情明细
+#   data/plugins/local.jargon-keeper/{jargon,expression,emoji}_verified.json
+#                                                                  自证台账（locked=已固定，failed=待重试）
+#   data/plugins/local.jargon-keeper/web_cache.json                联网检索缓存（可随时删，删了会重新查）
+# ============================================================================
+
+# ============================================================================
+# v2.2 新增：群友日程 + 上下文注入（v2.4 起人物档案已移除，长期画像交给宿主）
+# ----------------------------------------------------------------------------
+# 群友日程：每小时扫群聊，抽出“正在做/准备做/计划做”的短期安排；
+#           聊天时按需注入，过期或两周没人提后归档进宿主人物卡。
+# 注入：同一个 Hook 同时服务 planner 和 replyer，只在“有内容”时插入一小段背景，
+#       默认总字数上限 420，不会每轮都塞。
+# ============================================================================
+
+[agenda]
+enabled = true
+interval_minutes = 60          # 每小时扫一次群聊
+lookback_hours = 3             # 每次只看最近 3 小时
+max_streams = 3                # 最多扫 3 个群
+scan_private = false           # 私聊也扫（默认只扫群）
+max_messages_per_stream = 200
+max_events = 5                 # 注入时最多带 5 条日程
+llm_task = "utils"
+max_tokens = 4000
+temperature = 0.2
+writeback = true               # false = 只出报告不写库（dry-run 观察用）
+archive_to_person = true       # 结束的事件归档进 PersonInfo.memory_points（人物卡）
+expire_hours = 48              # 已确认事件过了时间 48 小时视为结束
+stale_days = 14                # 已确认事件 14 天没人再提就归档
+max_archive_per_run = 10
+candidate_ttl_hours = 72       # 待办候选最多留 72 小时，没确认就静默丢弃
+confirm_min_hits = 2           # 模糊时间（一会儿/之后）要再被提到 2 次才确认
+exact_confirm_confidence = 0.75 # 时间明确时，置信度 ≥0.75 可直接确认
+abstract_window_hours = 24     # “一会儿/之后”的观察窗：24 小时内看有没有执行证据
+relative_window_hours = 36     # “明天/周末”的观察窗
+purge_closed_days = 3          # 取消/丢弃记录保留 3 天后从文件删除
+purge_archived_days = 7        # 归档记录保留 7 天后从文件删除（人物卡记忆不受影响）
+inject = true
+
+[inject]
+enabled = true
+in_planner = true              # planner 请求前注入
+in_replyer = true              # replyer 请求前注入
+agenda = true                  # 注入最近安排
+max_events = 5
+max_chars = 420                # 注入块总字数上限
