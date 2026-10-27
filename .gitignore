@@ -5,3 +5,4 @@ config_back/
 data/
 _stub_data*/
 .pytest_cache/
+/config.toml

@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "github.jiakeju.maibot-curator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "name": "麦麦很好奇（MaiBot Curator）",
-  "description": "后台学习与整理插件：黑话 / 表达 / 表情三库自动清洗 + 群聊日程待办。①黑话：抽取后结合群内用法与联网检索多轮自证，高置信才补释义；②表达：embedding 聚类合并近似条目，LLM 判定质量与适用场景；③表情：补「画面描述｜标签｜适用场景」并去重、取消注册重复项；④日程：pending→confirmed→done/cancelled 状态机，确认后才注入上下文，结束后归档人物卡并定时清理。支持 dry-run，全中文注释配置。",
+  "description": "后台学习与整理插件：黑话 / 表达 / 表情三库自动清洗 + 群聊日程待办。①黑话：抽取后结合群内用法与联网检索多轮自证，高置信才补释义；②表达：embedding 聚类合并近似条目，LLM 判定质量与适用场景；③表情：补「画面描述｜标签｜适用场景」并去重、取消注册重复项；④日程：pending→confirmed→done/cancelled 状态机，确认后才注入上下文，结束后归档人物卡并定时清理。支持 dry-run，全中文注释配置。联网自证需在配置中自填 DeepSeek API Key（留空则只用群内证据）。",
   "author": {
     "name": "JJK",
     "url": "https://github.com/JiaKeJu"

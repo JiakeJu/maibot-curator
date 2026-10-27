@@ -31,7 +31,7 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 
 ## 配置
 
-配置文件在 `plugins/maibot-curator/config.toml`（首次加载自动生成，全部字段带中文注释）。几个常用开关：
+配置由 Runner 在首次加载时按 `config_model` 自动生成到插件目录 `config.toml`（全部字段带中文注释；**仓库不包含该文件**，升级不会覆盖/冲突）。几个常用开关：
 
 | 配置项 | 说明 | 默认 |
 |---|---|---|
@@ -41,14 +41,14 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 | `[agenda] confirm_min_hits` | 同一件事被提到几次才算确认 | `2` |
 | `[agenda] abstract_window_hours` | 「一会儿/之后」类安排的观察窗 | `24` |
 | `[inject] max_chars` | 注入上下文的最大字数 | `420` |
-| `[web] api_key` | 联网检索用的密钥；留空则自动复用宿主的 DeepSeek 配置 | `""` |
+| `[web] api_key` | 联网检索用的 DeepSeek API Key（[platform.deepseek.com](https://platform.deepseek.com) 自行申请）；留空则**只使用群内证据**，不联网 | `""` |
 
-**注意**：在 WebUI 插件配置页点「保存」会按 schema 重写 `config.toml`，可能丢掉注释。想保留注释请直接编辑文件（插件会自动热加载），或在 WebUI 保存后从仓库把 `config.toml` 拷回去。
+**注意**：在 WebUI 插件配置页点「保存」会按 schema 重写 `config.toml`，可能丢掉注释。想保留注释请直接编辑插件目录里的 `config.toml`（插件会自动热加载）；每次保存前 Runner 都会在插件目录的 `config_back/` 留备份，可从中找回。
 
 ## 工作原理
 
 - 通过 `maisaka.planner.before_request` / `maisaka.replyer.before_model_request` Hook，把【最近的安排】按需注入上下文（只注入已确认、且未过期的事件）。
-- 数据库读写、LLM、embedding、消息检索全部走宿主官方 capability（`database.query`、`llm.generate`、`llm.embed`、`message.get_recent`、`chat.get_group_streams` 等），不改宿主源码。
+- 数据库读写、LLM、embedding、消息检索全部走宿主官方 capability（`database.query`、`llm.generate`、`llm.embed`、`message.get_by_time_in_chat`、`chat.get_group_streams`、`config.get`、`person.get_id` 等），不改宿主源码、不读取宿主安装目录下的任何配置文件（包括 `model_config.toml`）。
 - 运行报告写入 `data/plugins/github.jiakeju.maibot-curator/last_report*.json`；自证台账写入 `*_verified.json`；日程/黑话等状态文件也在这个目录。
 
 ## 成本
@@ -57,6 +57,7 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 
 ## 版本记录
 
+- `v0.1.1`（2026-10-27）：按市场审核意见修复——仓库不再包含 `config.toml`（改由 Runner 生成、加入 `.gitignore`）；移除对宿主 `config/model_config.toml` 的读取，联网检索改为只使用插件配置里的 `[web] api_key`；消息读取改用 SDK 官方 `message.get_by_time_in_chat`（不再依赖私有参数），并用 `BotPlatformAccount` 过滤 Bot 自己的发言；`clear_high_frequency_terms` 注明整表清空。
 - `v0.1.0`（2026-10-27）：首个公开版本。黑话/表达/表情三库清洗 + 群聊日程待办；多轮多源自证；全中文注释配置。
 
 ## 许可

@@ -15,7 +15,7 @@
 
 == 多轮多源自证（v2.1，三模块共用） ==
 每条候选同时收集两路证据：
-  ① 群内用法：chat.get_group_streams 取群会话 → message.get_recent 找该词/表达/表情的
+  ① 群内用法：chat.get_group_streams 取群会话 → message.get_by_time_in_chat 找该词/表达/表情的
      真实原句（带时间与昵称）；
   ② 联网检索：DeepSeek /v1/tools/search，用 2~3 种不同问法各查一轮，必要时抓首条正文。
 两路交给 LLM 一次判定 {agree, confidence, group_specific}：
@@ -33,7 +33,7 @@
   自证层          _group_stream_ids / _stream_usage_lines / _verify_query_variants / _verify_targets
   黑话模块        _run_jargon / _jargon_evidence / _jargon_judge_batch / _jargon_prompt /
                   _parse_jargon_decisions / _jargon_verify_rounds / _jargon_apply
-  联网检索        _host_model_config / _search_credentials / _http_json / _web_search_term / 缓存
+  联网检索        _search_credentials / _http_json / _web_search_term / 缓存
   表达模块        _run_expression（聚类合并 → LLM 判质量 → 写回 → 自证）/ _expression_judge
   表情模块        _run_emoji（去重 → 补描述 → 自证）/ _emoji_enrich
   入口            create_plugin()
@@ -47,7 +47,7 @@
   不想联网              → [web] enabled = false（只用群内证据，自证变弱）
   想立刻重跑            → WebUI 插件页「运行一次」，或 state.json 对应 *_last_run_ts 置 0 后重启
 
-== 数据文件（插件 data_dir，即 data/plugins/local.jargon-keeper/） ==
+== 数据文件（插件 data_dir，即 data/plugins/<插件 id>/） ==
   state.json              各模块上次运行时间戳
   web_cache.json          联网检索缓存（可删，删了会重新查）
   {jargon,expression,emoji}_verified.json   自证台账（locked=已固定，failed=待重试）
@@ -225,7 +225,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用麦麦很好奇")
-    config_version: str = Field(default="0.1.0", description="配置版本")
+    config_version: str = Field(default="0.1.1", description="配置版本")
 
 
 class ScheduleConfig(PluginConfigBase):
@@ -259,25 +259,29 @@ class JargonConfig(PluginConfigBase):
     writeback: bool = Field(default=True, description="关闭时只出报告；打开后才会更新/删除黑话库")
     min_confidence: float = Field(default=0.6, description="低于该置信度的判定不写回")
     delete_rejected: bool = Field(default=True, description="把判定为常见词/无意义的候选从黑话库删除")
-    clear_high_frequency_terms: bool = Field(default=False, description="写回成功时清空高频词表（只影响黑话匹配打分）")
+    clear_high_frequency_terms: bool = Field(default=False, description="写回成功时清空高频词表（整表清空、不可恢复；仅影响黑话匹配打分，一般保持关闭）")
     max_writes_per_run: int = Field(default=40, description="单次最多写回多少条黑话")
     group_usage_hours: int = Field(default=336, description="自证时回看群内用法的时间窗口（小时）")
 
 
 class WebSearchConfig(PluginConfigBase):
-    """联网检索配置（三个模块的自证共用：黑话补含义、表达/表情交叉验证）。"""
+    """联网检索配置（三个模块的自证共用：黑话补含义、表达/表情交叉验证）。
+
+    本插件不读取宿主的任何配置文件；联网检索只使用下面 [web] 里填写的 api_key / base_url。
+    不填 api_key 时联网检索会自动跳过，只使用群内用法证据（见 README「配置」一节）。
+    """
 
     __ui_label__ = "联网检索"
     __ui_icon__ = "globe"
     __ui_order__ = 3
 
-    enabled: bool = Field(default=True, description="黑话置信度不足时是否联网检索复核")
-    api_key: str = Field(default="", description="留空则自动读取宿主 config/model_config.toml 的 DeepSeek Key")
-    base_url: str = Field(default="", description="留空则自动读取宿主的 DeepSeek base_url（默认 https://api.deepseek.com）")
+    enabled: bool = Field(default=True, description="联网检索总开关（未填写 api_key 时即使开启也只使用群内证据）")
+    api_key: str = Field(default="", description="DeepSeek API Key（联网检索自证用，请在 platform.deepseek.com 自行申请；留空=不联网）")
+    base_url: str = Field(default="", description="DeepSeek API 地址，留空使用默认 https://api.deepseek.com")
     timeout_seconds: int = Field(default=25, description="单次联网请求超时（秒）")
     per_term_results: int = Field(default=3, description="每个词最多取几条搜索结果")
     max_searches_per_run: int = Field(default=6, description="单次巡检最多联网检索多少个词")
-    fetch_top_page: bool = Field(default=True, description="是否抓取排名第一结果的正文摘要")
+    fetch_top_page: bool = Field(default=True, description="是否抓取排名第一结果的正文字摘要")
     cache_ttl_hours: int = Field(default=720, description="检索结果缓存时长（小时），避免重复花费")
     verification_rounds: int = Field(default=2, description="多轮自证轮数（2-3 轮，各轮结果一致才固定含义）")
     verify_terms_per_run: int = Field(default=4, description="单次最多对多少个词做多轮自证")
@@ -550,6 +554,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
     async def _run_modules(self, modules: List[str]) -> Dict[str, Any]:
         # 按顺序跑指定模块；某个模块抛错只记进 errors，不影响后续模块
         self._running = True
+        self._bot_ids = None
+        self._web_warned = False
         report: Dict[str, Any] = {
             "success": False,
             "generated_at": _now_iso(),
@@ -697,10 +703,18 @@ class LearningKeeperPlugin(MaiBotPlugin):
         if not targets or not stream_ids:
             return []
         lines: List[str] = []
+        await self._bot_account_ids()
         for sid in stream_ids:
+            end_ts = time.time()
+            start_ts = end_ts - max(1.0, float(hours)) * 3600
             try:
+                # 使用 SDK 公开签名的时间范围能力（chat_id / start_time / end_time / limit）
                 raw = await self.ctx.call_capability(
-                    "message.get_recent", chat_id=sid, hours=float(max(1, hours)), limit=int(max_scan)
+                    "message.get_by_time_in_chat",
+                    chat_id=sid,
+                    start_time=start_ts,
+                    end_time=end_ts,
+                    limit=int(max_scan),
                 )
             except Exception:  # noqa: BLE001
                 continue
@@ -715,6 +729,12 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     continue
                 flat = self._flatten_message(msg, sid, sid)
                 if flat is None:
+                    continue
+                # 本地兜底过滤：时间窗口 + Bot 自己的发言（不依赖宿主 filter_mai 私有参数）
+                when = _as_float(msg.get("timestamp"))
+                if when and when < start_ts:
+                    continue
+                if self._is_bot_message(flat):
                     continue
                 text = _text(flat.get("processed_plain_text"))
                 raw_content = json.dumps(msg, ensure_ascii=False, default=str)
@@ -1431,40 +1451,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
 
     # ===== 联网检索 =====
 
-    def _host_model_config(self) -> Dict[str, Any]:
-        """读取宿主 model_config.toml（用于复用 DeepSeek Key）。"""
-        try:
-            here = Path(__file__).resolve()
-            for parent in list(here.parents)[:5]:
-                candidate = parent / "config" / "model_config.toml"
-                if candidate.exists():
-                    import tomllib  # Python 3.11+
-
-                    with candidate.open("rb") as handle:
-                        return tomllib.load(handle)
-        except Exception:  # noqa: BLE001
-            pass
-        return {}
-
     def _search_credentials(self) -> Tuple[str, str]:
-        # 取联网 Key：先用插件配置，留空则回退读宿主 config/model_config.toml 的 [web.services.*]
+        """联网检索凭证：只使用插件配置 [web].api_key / [web].base_url，不读取宿主安装目录中的任何文件。"""
         api_key = _text(self.config.web.api_key)
         base_url = _text(self.config.web.base_url) or "https://api.deepseek.com"
-        if api_key and _text(self.config.web.base_url):
-            return api_key, base_url
-        config = self._host_model_config()
-        services = ((config.get("web") or {}).get("services") or {}) if isinstance(config, dict) else {}
-        for service in services.values():
-            if not isinstance(service, dict):
-                continue
-            adapter = _text(service.get("adapter"))
-            key = _text(service.get("api_key"))
-            if adapter in {"deepseek", "deepseek_search", "ds"} and key:
-                if not api_key:
-                    api_key = key
-                if not _text(self.config.web.base_url):
-                    base_url = _text(service.get("base_url")) or base_url
-                break
         return api_key, base_url
 
     async def _http_json(self, url: str, payload: Dict[str, Any], api_key: str) -> Dict[str, Any]:
@@ -1519,6 +1509,11 @@ class LearningKeeperPlugin(MaiBotPlugin):
             return cached
         api_key, base_url = self._search_credentials()
         if not api_key:
+            if not getattr(self, "_web_warned", False):
+                self._web_warned = True
+                self.ctx.logger.warning(
+                    "[maibot-curator] 未配置 [web] api_key，联网检索已跳过（只使用群内证据）"
+                )
             return {}
         base = base_url.rstrip("/")
         if not base.endswith("/v1"):
@@ -2161,17 +2156,21 @@ class LearningKeeperPlugin(MaiBotPlugin):
     async def _scan_messages(self, streams: List[Dict[str, Any]], hours: float, limit: int) -> List[Dict[str, Any]]:
         """批量读取多个会话的最近消息，按时间升序返回（已拍平成统一结构）。"""
         rows: List[Dict[str, Any]] = []
+        await self._bot_account_ids()
         for stream in streams:
             sid = _text(stream.get("session_id"))
             if not sid:
                 continue
+            end_ts = time.time()
+            start_ts = end_ts - max(1.0, float(hours)) * 3600
             try:
+                # 使用 SDK 公开签名的时间范围能力（chat_id / start_time / end_time / limit）
                 raw = await self.ctx.call_capability(
-                    "message.get_recent",
+                    "message.get_by_time_in_chat",
                     chat_id=sid,
-                    hours=float(max(1, hours)),
+                    start_time=start_ts,
+                    end_time=end_ts,
                     limit=int(max(1, limit)),
-                    filter_mai=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 self.ctx.logger.warning("[maibot-curator] 读取消息失败(chat=%s): %s", sid, exc)
@@ -2192,7 +2191,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             )
             for msg in messages or []:
                 flat = self._flatten_message(msg, sid, chat_name)
-                if flat is not None:
+                if flat is not None and not self._is_bot_message(flat):
                     rows.append(flat)
         rows.sort(key=lambda m: _as_float(m.get("timestamp")))
         self.ctx.logger.info(
@@ -2237,6 +2236,33 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "_chat_id": chat_id,
             "_chat_name": chat_name,
         }
+
+    async def _bot_account_ids(self) -> set:
+        """宿主上报的 Bot 平台账号集合（用于过滤 Bot 自己的发言，不依赖宿主私有参数）。"""
+        cached = getattr(self, "_bot_ids", None)
+        if isinstance(cached, set):
+            return cached
+        ids: set = set()
+        try:
+            rows = await self._db("BotPlatformAccount", "get", limit=20)
+            for row in rows or []:
+                if isinstance(row, dict):
+                    account_id = _text(row.get("account_id"))
+                    if account_id:
+                        ids.add(account_id)
+        except Exception:  # noqa: BLE001 - 读不到就退化为不过滤
+            ids = set()
+        self._bot_ids = ids
+        return ids
+
+    def _is_bot_message(self, flat: Optional[Dict[str, Any]]) -> bool:
+        """判断一条已拍平的消息是否由 Bot 自己发出。"""
+        if not isinstance(flat, dict):
+            return False
+        uid = _text(flat.get("user_id"))
+        if not uid:
+            return False
+        return uid in (getattr(self, "_bot_ids", None) or set())
 
     def _message_speaker(self, msg: Dict[str, Any]) -> Tuple[str, str]:
         """返回 (user_id, 昵称)。"""
@@ -2754,9 +2780,15 @@ class LearningKeeperPlugin(MaiBotPlugin):
             if person_id:
                 person_ids.append(person_id)
         elif session_id:
+            end_ts = time.time()
+            await self._bot_account_ids()
             try:
                 raw = await self.ctx.call_capability(
-                    "message.get_recent", chat_id=session_id, hours=2.0, limit=8, filter_mai=True
+                    "message.get_by_time_in_chat",
+                    chat_id=session_id,
+                    start_time=end_ts - 7200,
+                    end_time=end_ts,
+                    limit=8,
                 )
             except Exception:  # noqa: BLE001
                 raw = None
@@ -2771,6 +2803,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 for item in (messages or [])
                 if isinstance(item, dict)
             ]
+            messages = [item for item in messages if item and not self._is_bot_message(item)]
             seen: set = set()
             for msg in reversed(messages):
                 if not isinstance(msg, dict):
