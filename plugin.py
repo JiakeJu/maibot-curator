@@ -90,7 +90,6 @@ EXPRESSION_MODEL = "Expression"
 IMAGE_MODEL = "Images"
 HF_TERM_MODEL = "HighFrequencyTerm"
 
-MAX_EVIDENCE_LINES = 12
 MAX_EVIDENCE_IDS = 12
 MAX_SURROUNDING = 8
 WEB_FETCH_MAX_CHARS = 1500
@@ -104,9 +103,6 @@ _EMOJI_TAGS = (
     "自嘲 无语 卖萌 看戏 开心 委屈 生气 惊讶 害羞 敷衍 加油 安慰 "
     "吐槽 得意 摆烂 疑惑 亲昵 尴尬 温柔 坏笑"
 )
-
-# 网络梗/缩写的外观特征：出现多个连续字母时值得联网复核
-_NET_SLANG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,9}$")
 
 
 def _text(value: Any) -> str:
@@ -164,25 +160,6 @@ def _cosine(a: List[float], b: List[float]) -> float:
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
-
-def _parse_json_object(raw: str) -> Dict[str, Any]:
-    """从一段可能带 ``` 或解释文字的回复里抠出一个 JSON 对象。"""
-    cleaned = (raw or "").strip()
-    if not cleaned:
-        return {}
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start < 0 or end <= start:
-        return {}
-    try:
-        data = json.loads(cleaned[start : end + 1])
-    except ValueError:
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _parse_iso_ts(value: Any) -> float:
@@ -1170,80 +1147,6 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 }
             )
         return decisions
-
-    async def _jargon_web_lookup(
-        self, decisions: List[Dict[str, Any]], result: Dict[str, Any]
-    ) -> Dict[str, Dict[str, Any]]:
-        infos: Dict[str, Dict[str, Any]] = {}
-        for decision in decisions:
-            content = decision["content"]
-            try:
-                info = await self._web_search_term(content)
-            except Exception as exc:  # noqa: BLE001
-                result["errors"].append(f"联网检索失败 {content}: {exc}")
-                continue
-            if info:
-                infos[content] = info
-        return infos
-
-    async def _jargon_judge_with_web(
-        self,
-        candidates: List[Dict[str, Any]],
-        decisions: List[Dict[str, Any]],
-        web_infos: Dict[str, Dict[str, Any]],
-        result: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
-        by_content = {_text(item.get("content")): item for item in candidates}
-        parts = [
-            "你是 QQ 群黑话词库的整理助手。下面是群聊候选词、群内证据，以及联网检索到的解释。",
-            "请结合三方面信息给出最终判定：优先相信群聊里的实际用法；联网资料只作参考，如果它与群聊用法矛盾，以群聊为准并降低置信度。",
-            "输出字段：content、keep、is_jargon、meaning（不超过 20 个汉字）、confidence（0-1）。",
-            "meaning 要贴合群聊语境；证据与资料都不足时 keep=false。只输出 JSON 数组，不要解释。",
-            "",
-        ]
-        for decision in decisions:
-            content = decision["content"]
-            info = web_infos.get(content)
-            if not info:
-                continue
-            item = by_content.get(content) or {}
-            parts.append(f"- 词：{content}（出现 {_as_int(item.get('count'))} 次；首轮猜测：{decision.get('meaning') or '不确定'}）")
-            for hit in info.get("results") or []:
-                parts.append(f"  资料：{hit.get('title','')} | {hit.get('summary') or hit.get('snippet') or ''}")
-            page = info.get("page") or {}
-            if page.get("content"):
-                parts.append(f"  正文摘要：{_text(page.get('content'))[:800]}")
-        if len(parts) <= 7:
-            return decisions
-        try:
-            text = await self._llm(
-                "\n".join(parts),
-                task_name=self.config.jargon.llm_task,
-                max_tokens=int(self.config.jargon.max_tokens),
-                temperature=0.05,
-            )
-        except Exception as exc:  # noqa: BLE001
-            result["errors"].append(f"联网复核判定失败: {exc}")
-            return decisions
-        final = self._parse_jargon_decisions(text, [{"content": d["content"]} for d in decisions], result)
-        if not final:
-            return decisions
-        merged: Dict[str, Dict[str, Any]] = {d["content"]: d for d in decisions}
-        for item in final:
-            base = merged.get(item["content"])
-            if not base:
-                continue
-            base.update(
-                {
-                    "keep": item["keep"],
-                    "is_jargon": item["is_jargon"],
-                    "meaning": item["meaning"] or base["meaning"],
-                    "confidence": item["confidence"],
-                    "needs_web": False,
-                    "source": "web",
-                }
-            )
-        return list(merged.values())
 
     async def _jargon_verify_rounds(
         self,
