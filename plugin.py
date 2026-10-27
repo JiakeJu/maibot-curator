@@ -1,4 +1,4 @@
-﻿"""麦麦很好奇（MaiBot Curator）
+"""麦麦很好奇（MaiBot Curator）
 
 一句话：在后台定期巡检「黑话 / 表达方式 / 表情包」三个学习库，做补全、去重、清洗，
 让麦麦对群里的说法理解得更准，同时不把上下文和 token 浪费在噪音上。
@@ -57,7 +57,7 @@
 == 设计原则 ==
   - 全部通过宿主 capability（database/llm/message/chat）访问，不直接 import 宿主内部模块；
   - 写库前先出报告，所有写回都有 max_writes_per_run 上限；
-  - 联网走宿主同一把 DeepSeek Key，结果缓存 30 天，避免重复花费；
+  - 联网只使用插件自己配置的 [web] api_key（留空=不联网），检索结果命中缓存后复用，避免重复花费；
   - 任何一个模块出错只记录到 errors，不影响其他模块。
 """
 
@@ -77,7 +77,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from maibot_sdk import API, Field, HookHandler, MaiBotPlugin, PluginConfigBase
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
-try:  # 运行时环境有 httpx；纯离线环境下降级为 urllib
+try:  # 宿主运行环境自带 httpx（插件 SDK 亦依赖它）；缺失时联网功能自动禁用
     import httpx  # type: ignore
 except Exception:  # noqa: BLE001
     httpx = None  # type: ignore
@@ -225,7 +225,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用麦麦很好奇")
-    config_version: str = Field(default="0.1.1", description="配置版本")
+    config_version: str = Field(default="0.1.2", description="配置版本")
 
 
 class ScheduleConfig(PluginConfigBase):
@@ -455,6 +455,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
             self._task = None
             if task is not None and not task.done():
                 task.cancel()
+            return
+        # 重新启用（或改调度）时确保后台循环在跑：任务被 cancel 后只有 on_load 会重新拉起，这里补上
+        self._start_loop()
 
     def _start_loop(self) -> None:
         if not self.config.plugin.enabled:
@@ -471,17 +474,26 @@ class LearningKeeperPlugin(MaiBotPlugin):
             if delay:
                 await asyncio.sleep(delay)
             if self.config.schedule.run_on_load:
-                await self.run_due_modules()
+                await self._safe_run_due()
             while not self._stopping:
                 tick = max(5, int(self.config.schedule.tick_minutes))
                 await asyncio.sleep(tick * 60)
                 if self._stopping:
                     break
-                await self.run_due_modules()
+                await self._safe_run_due()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - 后台任务必须自愈
             self.ctx.logger.error("[maibot-curator] 调度循环异常: %s", exc, exc_info=True)
+
+    async def _safe_run_due(self) -> None:
+        """跑一轮到期的模块；单轮异常只记录、绝不终止循环（下一轮照常）。"""
+        try:
+            await self.run_due_modules()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 单轮失败不能结束后台巡检
+            self.ctx.logger.error("[maibot-curator] 本轮巡检异常（循环继续）: %s", exc, exc_info=True)
 
     # ===== 对外 API（WebUI 可手动触发） =====
 
@@ -1465,22 +1477,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 response.raise_for_status()
                 data = response.json()
                 return data if isinstance(data, dict) else {}
-        # 兜底：urllib 在线程里跑，接口行为一致
-        import urllib.request
-
-        def _do() -> Dict[str, Any]:
-            request = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(request, timeout=timeout) as reply:  # noqa: S310
-                text = reply.read().decode("utf-8", errors="replace")
-            parsed = json.loads(text)
-            return parsed if isinstance(parsed, dict) else {}
-
-        return await asyncio.to_thread(_do)
+        raise RuntimeError("当前运行环境缺少 httpx，联网检索不可用（插件会跳过联网、只用群内证据）")
 
     def _web_cache_key(self, term: str, query: str = "") -> str:
         if not query:
@@ -1513,6 +1510,13 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 self._web_warned = True
                 self.ctx.logger.warning(
                     "[maibot-curator] 未配置 [web] api_key，联网检索已跳过（只使用群内证据）"
+                )
+            return {}
+        if httpx is None:
+            if not getattr(self, "_web_warned", False):
+                self._web_warned = True
+                self.ctx.logger.warning(
+                    "[maibot-curator] 当前运行环境缺少 httpx，联网检索已跳过（只使用群内证据）"
                 )
             return {}
         base = base_url.rstrip("/")
