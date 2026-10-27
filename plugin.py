@@ -42,7 +42,7 @@
   想更省 token          → 调小 verify_terms_per_run / batch_size / max_rows；
                           缩短 group_usage_hours；调大 interval_minutes
   想判定更严格          → 调高各模块 min_confidence（黑话 0.6、表达 0.65、表情默认同）
-  只想看报告不改库      → writeback = false（报告仍会写 last_report*.json）
+  只想看报告不改库      → writeback = false（报告仍会写 last_report*.json；日程归档人物卡也跳过）
   太频繁/太吵           → interval_minutes 调大（黑话 360=6h，表达 10080=7d，表情 43200=30d）
   不想联网              → [web] enabled = false（只用群内证据，自证变弱）
   想立刻重跑            → WebUI 插件页「运行一次」，或 state.json 对应 *_last_run_ts 置 0 后重启
@@ -353,8 +353,8 @@ class AgendaConfig(PluginConfigBase):
     llm_task: str = Field(default="utils", description="使用的模型任务名")
     max_tokens: int = Field(default=4000, description="单次调用最大输出 token")
     temperature: float = Field(default=0.2, description="采样温度")
-    writeback: bool = Field(default=True, description="是否写回（false=只出报告，dry-run）")
-    archive_to_person: bool = Field(default=True, description="归档到宿主 PersonInfo.memory_points")
+    writeback: bool = Field(default=True, description="是否写回（false=只出报告，dry-run；人物卡归档也会跳过）")
+    archive_to_person: bool = Field(default=True, description="归档到宿主 PersonInfo.memory_points（dry-run 时不写）")
     expire_hours: int = Field(default=48, description="已确认事件过了时间多久视为结束（小时）")
     stale_days: int = Field(default=14, description="已确认事件多少天没人再提就归档")
     max_archive_per_run: int = Field(default=10, description="每轮最多归档多少条")
@@ -2480,8 +2480,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "last_mentioned_ts": now,
         }
 
-    async def _agenda_archive(self, event: Dict[str, Any], now: float, kind_label: str = "已结束") -> bool:
-        """把事件收尾并归档到宿主人物卡 memory_points。"""
+    async def _agenda_archive(
+        self, event: Dict[str, Any], now: float, kind_label: str = "已结束", dry_run: bool = False
+    ) -> bool:
+        """把事件收尾并归档到宿主人物卡 memory_points；dry_run=True 时只标记、不写人物卡。"""
         cfg = self.config.agenda
         event["status"] = "archived"
         event["archived_ts"] = now
@@ -2495,6 +2497,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
         day = time.strftime("%Y-%m-%d", time.localtime(due))
         memory_line = f"日程:{day} {who}{content}（{kind_label}）:1"
         event["archived_memory"] = memory_line
+        if dry_run:  # dry-run：事件照常标记归档、报告照常统计，但不碰宿主人物卡
+            return True
         if not pid:
             return False
         return await self._append_person_memory(pid, memory_line)
@@ -2687,7 +2691,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     known.append(target)
                 target["status"] = "confirmed"
                 target["confirmed_ts"] = now
-                if await self._agenda_archive(target, now, kind_label="已完成"):
+                if await self._agenda_archive(target, now, kind_label="已完成", dry_run=dry_run):
                     result["archived"] += 1
                 result["done"] += 1
                 continue
@@ -2732,10 +2736,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
             last = _as_float(event.get("last_mentioned_ts") or event.get("created_ts"))
             if status == "confirmed":
                 if due and now > due + float(cfg.expire_hours) * 3600:
-                    if await self._agenda_archive(event, now, kind_label="已结束"):
+                    if await self._agenda_archive(event, now, kind_label="已结束", dry_run=dry_run):
                         result["archived"] += 1
                 elif now - last > float(cfg.stale_days) * 86400:
-                    if await self._agenda_archive(event, now, kind_label="已结束"):
+                    if await self._agenda_archive(event, now, kind_label="已结束", dry_run=dry_run):
                         result["archived"] += 1
             elif status == "pending":
                 resolve_by = _as_float(event.get("resolve_by"))
@@ -2754,7 +2758,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             f"待办 +{result['pending_new']} / 更新 {result['pending_update']}；"
             f"确认 {result['confirmed']}，完成 {result['done']}，取消 {result['cancelled']}，"
             f"丢弃 {result['dropped']}，归档 {result['archived']}，清理 {result['purged']}"
-            f"（{'只报告' if dry_run else '已写回'}）"
+            f"（{'只报告，未写人物卡' if dry_run else '已写回'}）"
         )
         result["events"] = [
             {
