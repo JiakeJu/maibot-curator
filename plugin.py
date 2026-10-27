@@ -401,6 +401,28 @@ class LearningKeeperPlugin(MaiBotPlugin):
 
     config_model = LearningKeeperPluginConfig
 
+    @classmethod
+    def build_config_schema(cls, **kwargs: Any) -> Dict[str, Any]:
+        """在 SDK 生成的 WebUI 配置 Schema 上补齐字段提示（hint）。
+
+        MaiBot WebUI 只有在字段带 ``hint``（来自 ``json_schema_extra={"hint": ...}``）
+        时才会在输入框下方显示灰色说明；这里统一把字段的 ``description`` 回填到
+        ``hint``，避免 90 个字段逐条重复写 hint，也保证说明只有一处真相。
+        """
+        schema = super().build_config_schema(**kwargs)
+        sections = schema.get("sections") if isinstance(schema, dict) else None
+        if isinstance(sections, dict):
+            for section in sections.values():
+                fields = section.get("fields") if isinstance(section, dict) else None
+                if not isinstance(fields, dict):
+                    continue
+                for field in fields.values():
+                    if not isinstance(field, dict):
+                        continue
+                    if not field.get("hint") and field.get("description"):
+                        field["hint"] = field["description"]
+        return schema
+
     def __init__(self) -> None:
         super().__init__()
         self._task: Optional[asyncio.Task[None]] = None
