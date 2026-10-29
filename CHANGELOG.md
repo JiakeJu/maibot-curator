@@ -2,6 +2,16 @@
 
 本文件记录「麦麦很好奇（Memory Keeper）」每次发布的完整改动；README 里的「版本记录」是摘要，这里保留细节（含市场复审反馈、自查项与代码清理），便于回看与升级对照。
 
+## v0.1.4（2026-10-29）
+
+- 表达方式：新增人格适配严判（默认开启）：按宿主人格设定对「会被采用」的表达再判一轮，删除攻击性强、阴阳怪气、低俗擦边、适用面窄、与角色不符、纯碎片的条目；dry-run 只报告不删。
+- 表达方式：新增自动精选模式 `auto_check_mode`（off/report/on，默认 report）、`auto_check_min_confidence`（默认 0.9）、`auto_check_double_check`（默认开）、`auto_check_max_per_run`（默认 10）、`auto_check_log`（记录 auto_checked.json）。
+- 表达方式：新增人格判定取向开关 `persona_mode`（conservative=保守学习、优先角色一致性；adapt=主动向群内交流风格靠拢、允许群内流行但干净的说法；默认 conservative）。
+- 表达方式：判定时结合群聊上下文（`context_lines`，默认 6 条）；默认间隔 12 小时、单轮 300 条、批量 10。
+- 黑话：先整理再判断——归一化去重、合并词频、剔除无意义条目；已完成的词条定期复核（`recheck_complete`/`recheck_days`）；默认间隔 4 小时。
+- 表情：补写描述时参考群聊上下文。
+- manifest 简介精简为两句话，技术细节保留在 README。
+
 ## v0.1.3（2026-10-27）
 
 ### 配置说明与 WebUI 可读性

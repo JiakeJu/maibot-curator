@@ -99,6 +99,11 @@ _COMMON_WORDS_EXCLUDED = (
     "这个 那个 什么 怎么 可以 不行 就是 还是 但是 所以 因为 如果 然后 现在 今天 明天 昨天"
 )
 
+_AUTO_ADOPT_BLOCK_WORDS = (
+    "傻逼", "妈的", "操你", "卧槽", "尼玛", "草泥马", "cnm", "nmsl", "tmd",
+    "fuck", "shit", "涩涩", "约炮", "裸聊",
+)
+
 _EMOJI_TAGS = (
     "自嘲 无语 卖萌 看戏 开心 委屈 生气 惊讶 害羞 敷衍 加油 安慰 "
     "吐槽 得意 摆烂 疑惑 亲昵 尴尬 温柔 坏笑"
@@ -202,7 +207,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="插件总开关（true/false，默认 true；关闭后不再巡检，也不再注入上下文）")
-    config_version: str = Field(default="0.1.3", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
+    config_version: str = Field(default="0.1.4", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
 
 
 class ScheduleConfig(PluginConfigBase):
@@ -225,7 +230,7 @@ class JargonConfig(PluginConfigBase):
     __ui_order__ = 2
 
     enabled: bool = Field(default=True, description="是否启用黑话学习模块（true/false，默认 true）")
-    interval_minutes: int = Field(default=360, description="黑话模块运行间隔（分钟，默认 360=6 小时；范围 0–43200；0=不自动运行）")
+    interval_minutes: int = Field(default=240, description="黑话模块运行间隔（分钟，默认 240=4 小时；范围 0–43200；0=不自动运行）")
     batch_size: int = Field(default=6, description="每次交给 LLM 判定的候选词数量（默认 6；范围 1–50）")
     max_candidates: int = Field(default=30, description="单次最多处理多少个候选词（默认 30；范围 1–500）")
     min_count: int = Field(default=2, description="一个词至少出现过多少次才进入候选（默认 2；范围 1–100）")
@@ -239,6 +244,10 @@ class JargonConfig(PluginConfigBase):
     clear_high_frequency_terms: bool = Field(default=False, description="写回成功时清空高频词表（整表清空、不可恢复；只影响黑话匹配打分，一般保持关闭；true/false，默认 false）")
     max_writes_per_run: int = Field(default=40, description="单次最多写回多少条黑话（默认 40；范围 0–1000；0=不写回）")
     group_usage_hours: int = Field(default=336, description="自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760）")
+    dedupe_similar: bool = Field(default=True, description="收录前是否先整理：同一词的不同写法归一化去重、合并词频（true/false，默认 true）")
+    recheck_complete: bool = Field(default=True, description="是否定期复核已完成的词条（看是否仍在使用、含义是否准确；true/false，默认 true）")
+    recheck_days: int = Field(default=30, description="已完成词条多少天未复核才重新判定（默认 30；范围 1–365）")
+    context_lines: int = Field(default=6, description="判定时参考的群聊上下文条数（默认 6；范围 0–30；0=只使用该词自身证据）")
 
 
 class WebSearchConfig(PluginConfigBase):
@@ -273,9 +282,9 @@ class ExpressionConfig(PluginConfigBase):
     __ui_order__ = 4
 
     enabled: bool = Field(default=True, description="是否启用表达方式优化模块（true/false，默认 true）")
-    interval_minutes: int = Field(default=10080, description="表达模块运行间隔（分钟，默认 10080=7 天；范围 0–525600；0=不自动运行）")
-    batch_size: int = Field(default=20, description="每次交给 LLM 处理的表达条数（默认 20；范围 1–40；40 易触发输出截断，20 更稳）")
-    max_rows: int = Field(default=120, description="单次最多扫描多少条 AI 学习表达（默认 120；范围 1–1000）")
+    interval_minutes: int = Field(default=720, description="表达模块运行间隔（分钟，默认 720=12 小时；范围 0–525600；0=不自动运行）")
+    batch_size: int = Field(default=10, description="每次交给 LLM 处理的表达条数（默认 10；范围 1–40；太大易触发输出截断）")
+    max_rows: int = Field(default=300, description="单次最多扫描多少条 AI 学习表达（默认 300；范围 1–1000）")
     llm_task: str = Field(default="utils", description="调用宿主哪个 LLM 任务（默认 utils；需与宿主模型配置里的任务名一致）")
     max_tokens: int = Field(default=4000, description="单次 LLM 输出 token 上限（默认 4000；范围 256–32768）")
     similarity_threshold: float = Field(default=0.92, description="embedding 相似度达到多少视为重复并合并（默认 0.92；范围 0–1）")
@@ -283,10 +292,29 @@ class ExpressionConfig(PluginConfigBase):
     delete_meaningless: bool = Field(default=True, description="是否删除判定为无意义的表达（true/false，默认 true）")
     min_confidence: float = Field(default=0.65, description="低于该置信度的判定不写回（默认 0.65；范围 0–1）")
     max_writes_per_run: int = Field(default=200, description="单次最多写回多少条表达（默认 200；范围 0–2000）")
-    auto_check: bool = Field(default=False, description="是否把高置信表达自动标记为可注入（true/false，默认 false；仍建议人工勾选）")
+    auto_check: bool = Field(default=False, description="旧版自动勾选开关（true/false，默认 false；已由 auto_check_mode 取代，仅为兼容保留）")
     verification_rounds: int = Field(default=2, description="多轮自证轮数（默认 2；范围 1–5；群内用法 + 联网检索）")
     verify_terms_per_run: int = Field(default=8, description="单次最多对多少条表达做多轮自证（默认 8；范围 0–50）")
     group_usage_hours: int = Field(default=336, description="自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760）")
+    persona_filter: bool = Field(default=True, description="是否对将被采用的表达做「人格适配严判」（true/false，默认 true；按宿主人格设定删掉攻击性强、适用面窄、不符合角色的表达）")
+    persona_delete: bool = Field(default=True, description="人格严判不通过时是否直接删除（true/false，默认 true；false=只写进报告不删，建议先观察一轮）")
+    persona_max_rows: int = Field(default=80, description="单次最多严判多少条表达（默认 80；范围 1–300；只判第一轮认定有意义的条目）")
+    persona_max_chars: int = Field(default=1200, description="读入宿主人格设定的字数上限（默认 1200；范围 200–4000；太小判断不准，太大费 token）")
+    persona_traits: str = Field(default="友善、温和，偶尔毒舌和俏皮；不刻薄、不贬低他人、不油腻", description="目标角色性格关键词（默认「友善、温和，偶尔毒舌和俏皮；不刻薄、不贬低他人、不油腻」；用顿号或分号分隔）")
+    auto_check_mode: str = Field(default="report", description="自动采纳模式（off=不自动；report=只生成候选清单不勾选；on=合格即自动勾选；默认 report，建议先跑一轮 report 观察）")
+    auto_check_min_confidence: float = Field(default=0.9, description="自动采纳所需的判定置信度（默认 0.9；范围 0–1）")
+    auto_check_double_check: bool = Field(default=True, description="自动采纳前是否二次复核（true/false，默认 true；多一次 LLM 调用换更高准确率）")
+    auto_check_max_per_run: int = Field(default=10, description="单次最多自动勾选多少条（默认 10；范围 0–500）")
+    auto_check_log: bool = Field(default=True, description="是否记录自动勾选清单到 auto_checked.json（true/false，默认 true；便于检查与回滚）")
+    context_lines: int = Field(default=6, description="判定时参考的群聊上下文条数（默认 6；范围 0–30；0=不参考上下文）")
+    persona_mode: str = Field(
+        default="conservative",
+        description=(
+            "人格判定取向：conservative=保守学习，优先角色一致性，群内流行但与角色口吻冲突的表达也删；"
+            "adapt=主动向本群交流风格靠拢，允许群内流行、干净、不伤人的说法（与角色口吻略偏也可采用）；"
+            "默认 conservative，建议先保守观察一轮再切 adapt"
+        ),
+    )
 
 
 class EmojiConfig(PluginConfigBase):
@@ -311,6 +339,7 @@ class EmojiConfig(PluginConfigBase):
     verification_rounds: int = Field(default=2, description="多轮自证轮数（默认 2；范围 1–5；群内用法 + 联网检索）")
     verify_terms_per_run: int = Field(default=15, description="单次最多对多少张表情做多轮自证（默认 15；范围 0–50）")
     group_usage_hours: int = Field(default=720, description="自证时回看群内用法的时间窗口（小时，默认 720=30 天；范围 1–8760）")
+    context_lines: int = Field(default=4, description="补写描述时参考的群聊上下文条数（默认 4；范围 0–30）")
 
 
 class AgendaConfig(PluginConfigBase):
@@ -413,6 +442,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
         self._expression_verified: Dict[str, Any] = {}
         self._emoji_verified: Dict[str, Any] = {}
         self._agenda: Dict[str, Any] = {}
+        self._persona_cache: Optional[str] = None
 
     # ===== 生命周期 =====
 
@@ -567,6 +597,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
         self._running = True
         self._bot_ids = None
         self._web_warned = False
+        self._persona_cache = None
         report: Dict[str, Any] = {
             "success": False,
             "generated_at": _now_iso(),
@@ -906,6 +937,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "candidates": 0,
             "decisions": [],
             "web_used": 0,
+            "organized": {"merged": 0, "deleted": 0},
+            "rechecked": 0,
             "applied": {"updated": 0, "deleted": 0, "settled": 0, "hf_cleared": False},
             "summary": "",
             "errors": [],
@@ -914,6 +947,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
         if not isinstance(rows, list):
             result["errors"].append(f"读取黑话库失败: {rows!r}")
             return result
+        rows = await self._jargon_organize(rows, result)
         min_count = max(1, int(cfg.min_count))
         candidates: List[Dict[str, Any]] = []
         for row in rows:
@@ -928,7 +962,14 @@ class LearningKeeperPlugin(MaiBotPlugin):
             if count < min_count:
                 continue
             if meaning and complete:
-                continue
+                if not cfg.recheck_complete:
+                    continue
+                last_ts = _as_float(row.get("last_seen_timestamp") or row.get("updated_timestamp") or row.get("created_timestamp"))
+                if last_ts > 0 and (time.time() - last_ts) < max(1, int(cfg.recheck_days)) * 86400:
+                    continue
+                row = dict(row)
+                row["_recheck"] = True
+                result["rechecked"] = _as_int(result.get("rechecked")) + 1
             candidates.append(row)
         candidates = candidates[: max(1, int(cfg.max_candidates))]
         result["candidates"] = len(candidates)
@@ -985,6 +1026,89 @@ class LearningKeeperPlugin(MaiBotPlugin):
             f"（{result.get('verified_rounds', 0)} 轮检索）"
         )
         return result
+
+
+    async def _jargon_organize(self, rows: List[Dict[str, Any]], result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """收录前整理：同一词的不同写法归一化去重、合并词频，并剔除无意义条目。"""
+        cfg = self.config.jargon
+        if not cfg.dedupe_similar:
+            return rows
+        dry_run = not cfg.writeback
+        budget = max(0, int(cfg.max_writes_per_run))
+        merged_count = 0
+        deleted = 0
+
+        def norm(value: str) -> str:
+            text_value = _text(value).strip()
+            text_value = re.sub(r"[\s\u3000]+", "", text_value)
+            return text_value.lower()
+
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        dropped: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            content = _text(row.get("content"))
+            key = norm(content)
+            if not key or not self._jargon_meaningful(key):
+                dropped.append(row)
+                continue
+            groups.setdefault(key, []).append(row)
+        meaningful: List[Dict[str, Any]] = []
+        for items in groups.values():
+            if len(items) < 2:
+                meaningful.extend(items)
+                continue
+            keeper = max(items, key=lambda row: (_as_int(row.get("count")), -_as_int(row.get("id"))))
+            total = sum(_as_int(row.get("count")) for row in items)
+            if not dry_run and budget > 0:
+                try:
+                    await self._db(JARGON_MODEL, "update", filters={"id": keeper.get("id")}, data={"count": total})
+                    budget -= 1
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(f"黑话合并计数失败 {keeper.get('id')}: {exc}")
+            keeper["count"] = total
+            for row in items:
+                if row is keeper:
+                    continue
+                merged_count += 1
+                if dry_run or budget <= 0:
+                    continue
+                try:
+                    await self._db(JARGON_MODEL, "delete", filters={"id": row.get("id")})
+                    budget -= 1
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(f"黑话去重删除失败 {row.get('id')}: {exc}")
+            meaningful.append(keeper)
+        if dropped and cfg.delete_rejected and not dry_run:
+            for row in dropped:
+                if budget <= 0:
+                    break
+                try:
+                    await self._db(JARGON_MODEL, "delete", filters={"id": row.get("id")})
+                    budget -= 1
+                    deleted += 1
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(f"黑话清理失败 {row.get('id')}: {exc}")
+        result["organized"] = {"merged": merged_count, "deleted": deleted}
+        if deleted:
+            result["applied"]["deleted"] = _as_int(result["applied"].get("deleted")) + deleted
+        return meaningful
+
+    def _jargon_meaningful(self, key: str) -> bool:
+        if not key:
+            return False
+        if len(key) > 24:
+            return False
+        if len(key) == 1 and key.isascii():
+            return False
+        if re.fullmatch(r"[\W_]+", key):
+            return False
+        if re.fullmatch(r"\d+", key):
+            return False
+        if key in _COMMON_WORDS_EXCLUDED:
+            return False
+        return True
 
     async def _jargon_evidence(self, item: Dict[str, Any], result: Dict[str, Any]) -> List[str]:
         limit = max(3, int(self.config.jargon.evidence_lines))
@@ -1098,6 +1222,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "2) meaning：若 keep 为 true，用不超过 20 个汉字说明它在群里的意思；不要复述词本身，不要编造。证据不足或不确定，就把 keep 设为 false。",
             "3) confidence：0 到 1 的置信度。",
             "4) needs_web：如果你觉得这是网络流行语/缩写，但仅凭群聊证据无法确定含义，设为 true（最多 6 个词）。",
+            "5) 结合证据里的真实聊天上下文综合判断：这个词在群里怎么用、使用场景是什么；如果证据显示它已不再使用、或含义与已有释义不符，就把 keep 设为 false 或给出更准确的 meaning。",
+            "6) 标记为「复核」的词条：重点看它是否仍在使用、原含义是否准确；仍准确就 keep=true 并给出 meaning，不再使用则 keep=false。",
             "",
             "候选：",
         ]
@@ -1105,7 +1231,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
             content = _text(item.get("content"))
             if not content:
                 continue
-            parts.append(f"- 词：{content}（出现 {_as_int(item.get('count'))} 次）")
+            tag = "（复核）" if item.get("_recheck") else ""
+            parts.append(f"- 词：{content}{tag}（出现 {_as_int(item.get('count'))} 次）")
             lines = evidence.get(content) or []
             if lines:
                 parts.append("  证据：")
@@ -1495,6 +1622,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "rewritten": 0,
             "deleted": 0,
             "checked": 0,
+            "persona_judged": 0,
+            "persona_deleted": 0,
+            "auto_candidates": 0,
+            "auto_checked": 0,
             "summary": "",
             "errors": [],
         }
@@ -1619,6 +1750,12 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     writes += 1
                 except Exception as exc:  # noqa: BLE001
                     result["errors"].append(f"改写表达失败 {row_id}: {exc}")
+        # 2.5) 人格适配严判：对会被采用的表达再判一轮，删掉攻击性强、适用面窄、不符合角色的
+        persona_deleted_ids, writes, persona_verdicts = await self._expression_persona_purge(
+            judged_rows, result, max(0, int(cfg.max_writes_per_run) - writes)
+        )
+        await self._expression_auto_adopt(judged_rows, persona_verdicts, result)
+        result.pop("_persona_verdicts", None)
         # 3) 多轮多源自证：群内用法 + 联网检索（只对低置信条目，控制 token）
         result["verified_locked"] = 0
         result["group_specific"] = 0
@@ -1630,6 +1767,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 row = item["row"]
                 decision = item["decision"]
                 if not decision.get("useful"):
+                    continue
+                if _as_int(row.get("id")) in persona_deleted_ids:
                     continue
                 if _as_float(decision.get("confidence")) >= 0.85:
                     continue
@@ -1691,6 +1830,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
         result["summary"] = (
             f"扫描 {result['scanned']}，合并 {result['merged']}，判定 {result['judged']}，"
             f"改写 {result['rewritten']}，删除 {result['deleted']}，自证固定 {result['verified_locked']}"
+            f"，人格严判 {result['persona_judged']}（删 {result['persona_deleted']}）"
+            f"，自动采纳候选 {result['auto_candidates']}（勾选 {result['auto_checked']}）"
             f"（{'只报告' if dry_run else '已写回'}）"
         )
         result["sample"] = [
@@ -1714,8 +1855,22 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "只输出 JSON 数组，不要解释。示例：",
             '[{"id":1,"useful":true,"situation":"被调侃时","style":"才没有呢，别乱说","confidence":0.8}]',
             "",
-            "条目：",
         ]
+        try:
+            cfg_ctx = self.config.expression
+            context_lines: List[str] = []
+            if int(cfg_ctx.context_lines) > 0:
+                sessions = [_text(row.get("session_id")) for row in batch if _text(row.get("session_id"))]
+                context_lines = await self._expression_context_lines(
+                    sessions[0] if sessions else "", int(cfg_ctx.context_lines)
+                )
+            if context_lines:
+                lines.append("")
+                lines.append("最近群聊（仅供判断使用场景，不要照抄）：")
+                lines.extend(f"- {entry}" for entry in context_lines)
+        except Exception:  # noqa: BLE001
+            pass
+        lines.append("条目：")
         for row in batch:
             lines.append(
                 f'- id={row.get("id")} 情景：{_text(row.get("situation"))[:60]} ｜ 风格：{_text(row.get("style"))[:60]} ｜ 出现次数：{_as_int(row.get("count"))}'
@@ -1752,6 +1907,261 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 }
             )
         return decisions
+
+
+    async def _expression_context_lines(self, session_id: str, limit: int) -> List[str]:
+        """读取最近群聊，作为判定表达使用场景的上下文。"""
+        if not session_id or limit <= 0:
+            return []
+        try:
+            now = time.time()
+            raw = await self.ctx.call_capability(
+                "message.get_by_time_in_chat",
+                chat_id=session_id,
+                start_time=now - 6 * 3600,
+                end_time=now,
+                limit=max(1, min(30, int(limit))),
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        if isinstance(raw, list):
+            messages = raw
+        elif isinstance(raw, dict):
+            messages = raw.get("messages")
+        else:
+            messages = None
+        lines: List[str] = []
+        for message in messages or []:
+            flat = self._flatten_message(message, session_id, "")
+            if not flat or self._is_bot_message(flat):
+                continue
+            body = _text(flat.get("processed_plain_text"))[:60]
+            if not body:
+                continue
+            speaker = _text(flat.get("user_cardname") or flat.get("user_nickname") or "群友")[:12]
+            lines.append(f"{speaker}：{body}")
+        return lines[-int(limit):]
+
+    def _expression_auto_gate(self, style: str) -> str:
+        """自动采纳前的确定性过滤：返回不通过原因，空串=通过。"""
+        text = _text(style).strip()
+        if len(text) < 2 or len(text) > 40:
+            return "长度不合适"
+        if not any(ch.isalnum() or "\u4e00" <= ch <= "\u9fff" for ch in text):
+            return "纯符号"
+        if re.search(r"[A-Za-z]{3,}|\d{2,}", text):
+            return "含网络缩写或数字"
+        if re.search(r"https?://|www\.", text):
+            return "含链接"
+        for word in _AUTO_ADOPT_BLOCK_WORDS:
+            if word in text:
+                return f"含不适合词:{word}"
+        return ""
+
+    async def _expression_persona_purge(
+        self,
+        judged_rows: List[Dict[str, Any]],
+        result: Dict[str, Any],
+        write_budget: int,
+    ) -> Tuple[set, int, Dict[int, Dict[str, Any]]]:
+        cfg = self.config.expression
+        verdicts: Dict[int, Dict[str, Any]] = {}
+        if not cfg.persona_filter:
+            result["_persona_verdicts"] = verdicts
+            return set(), 0, verdicts
+        persona = await self._persona_text()
+        if not persona:
+            result["_persona_verdicts"] = verdicts
+            return set(), 0, verdicts
+        rows: List[Dict[str, Any]] = []
+        for item in judged_rows:
+            decision = item.get("decision") or {}
+            if decision.get("useful"):
+                rows.append(item["row"])
+        rows = rows[: max(1, int(cfg.persona_max_rows))]
+        if not rows:
+            result["_persona_verdicts"] = verdicts
+            return set(), 0, verdicts
+        nickname = await self._bot_nickname()
+        batch_size = max(1, int(cfg.batch_size))
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start : start + batch_size]
+            for entry in await self._expression_persona_judge(batch, persona, nickname, result):
+                verdicts[_as_int(entry.get("id"))] = entry
+        result["persona_judged"] = len(verdicts)
+        deleted: set = set()
+        writes = 0
+        if cfg.persona_delete and cfg.writeback:
+            for row in rows:
+                row_id = _as_int(row.get("id"))
+                entry = verdicts.get(row_id)
+                if not entry or entry.get("suitable") is not False:
+                    continue
+                if writes >= write_budget:
+                    break
+                try:
+                    await self._db(EXPRESSION_MODEL, "delete", filters={"id": row_id})
+                    deleted.add(row_id)
+                    writes += 1
+                    result["persona_deleted"] = _as_int(result.get("persona_deleted")) + 1
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(f"人格严判删除失败 {row_id}: {exc}")
+        result["_persona_verdicts"] = verdicts
+        return deleted, writes, verdicts
+
+    async def _expression_persona_judge(
+        self,
+        batch: List[Dict[str, Any]],
+        persona: str,
+        nickname: str,
+        result: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        cfg = self.config.expression
+        mode = _text(getattr(cfg, "persona_mode", "conservative")).strip().lower()
+        lines = [
+            f"你是 QQ 群机器人「{nickname or '麦麦'}」的发言审查员。机器人准备把这些「表达方式」用于群聊回复。",
+            "机器人人设（节选）：",
+            persona[:1000],
+            "",
+            f"目标性格：{_text(cfg.persona_traits)}",
+            (
+                "学习取向：主动向本群交流风格靠拢——允许群内流行、干净、不伤人的说法"
+                "（即使与角色口吻略有出入，也可以采用）；只拦攻击性、低俗、纯碎片、容易让人不适的内容。"
+                if mode == "adapt"
+                else "学习取向：保守学习——优先角色一致性；群内流行但与角色口吻冲突的表达也判为不合适；"
+                "只保留干净、温和、像角色本人会说的话。"
+            ),
+            "请判断每条表达在群聊里说出来是否合适：",
+            "不合适（suitable=false）：攻击性、阴阳怪气、贬低他人；低俗擦边；只在小圈子/特定梗里成立、换群就突兀；与目标性格冲突；纯碎片或无意义；油腻、老成、过度玩梗。",
+            "合适（suitable=true）：在本群聊天里自然、干净、能接得上话（adapt 模式下也接受贴合群内风格的流行说法）。",
+            "只输出 JSON 数组，不要解释。示例：",
+            '[{"id":1,"suitable":true,"reason":"温和自然","risk":"none"}]',
+            "",
+            "条目：",
+        ]
+        for row in batch:
+            lines.append(
+                f'- id={row.get("id")} 情景：{_text(row.get("situation"))[:60]} ｜ 风格：{_text(row.get("style"))[:60]}'
+            )
+        try:
+            text = await self._llm(
+                "\n".join(lines),
+                task_name=cfg.llm_task,
+                max_tokens=int(cfg.max_tokens),
+                temperature=0.1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result["errors"].append(f"人格严判失败: {exc}")
+            return []
+        parsed = _parse_json_array(text)
+        if parsed is None:
+            result["errors"].append(f"人格严判输出无法解析: {text[:120]}")
+            return []
+        known = {_as_int(row.get("id")) for row in batch}
+        entries: List[Dict[str, Any]] = []
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            row_id = _as_int(entry.get("id"))
+            if row_id not in known or "suitable" not in entry:
+                continue
+            entries.append(
+                {
+                    "id": row_id,
+                    "suitable": bool(entry.get("suitable")),
+                    "reason": _text(entry.get("reason"))[:20],
+                    "risk": _text(entry.get("risk")).lower() or "none",
+                }
+            )
+        return entries
+
+    async def _expression_auto_adopt(
+        self,
+        judged_rows: List[Dict[str, Any]],
+        verdicts: Dict[int, Dict[str, Any]],
+        result: Dict[str, Any],
+    ) -> None:
+        """自动精选：人格严判通过 + 确定性过滤 + 二次复核 → 候选清单/自动勾选。"""
+        cfg = self.config.expression
+        mode = _text(cfg.auto_check_mode).lower() or "off"
+        if mode not in ("off", "report", "on"):
+            mode = "report"
+        if mode == "off" and bool(cfg.auto_check):
+            mode = "on"
+        result["auto_candidates"] = 0
+        result["auto_checked"] = 0
+        if mode == "off" or not cfg.writeback:
+            return
+        candidates: List[Dict[str, Any]] = []
+        for item in judged_rows:
+            row = item["row"]
+            decision = item.get("decision") or {}
+            row_id = _as_int(row.get("id"))
+            if not decision.get("useful"):
+                continue
+            if _as_float(decision.get("confidence")) < float(cfg.auto_check_min_confidence):
+                continue
+            if cfg.persona_filter:
+                entry = verdicts.get(row_id)
+                if not entry or entry.get("suitable") is not True:
+                    continue
+                if _text(entry.get("risk")) not in ("none", ""):
+                    continue
+            if self._expression_auto_gate(_text(decision.get("style") or row.get("style"))):
+                continue
+            candidates.append(item)
+        if not candidates:
+            return
+        if cfg.auto_check_double_check and cfg.persona_filter:
+            persona = await self._persona_text()
+            nickname = await self._bot_nickname()
+            if persona:
+                confirmed: set = set()
+                rows = [item["row"] for item in candidates]
+                batch_size = max(1, int(cfg.batch_size))
+                for start in range(0, len(rows), batch_size):
+                    batch = rows[start : start + batch_size]
+                    for entry in await self._expression_persona_judge(batch, persona, nickname, result):
+                        if entry.get("suitable") is True and _text(entry.get("risk")) in ("none", ""):
+                            confirmed.add(_as_int(entry.get("id")))
+                candidates = [item for item in candidates if _as_int(item["row"].get("id")) in confirmed]
+        candidates = candidates[: max(0, int(cfg.auto_check_max_per_run))]
+        result["auto_candidates"] = len(candidates)
+        if not candidates:
+            return
+        log_entries: List[Dict[str, Any]] = []
+        budget = max(0, int(cfg.max_writes_per_run))
+        for item in candidates:
+            row = item["row"]
+            decision = item.get("decision") or {}
+            entry = {
+                "id": row.get("id"),
+                "situation": _text(decision.get("situation") or row.get("situation"))[:60],
+                "style": _text(decision.get("style") or row.get("style"))[:80],
+                "confidence": round(_as_float(decision.get("confidence")), 3),
+                "mode": mode,
+                "adopted": False,
+                "ts": int(time.time()),
+            }
+            if mode == "on" and budget > 0:
+                try:
+                    await self._db(EXPRESSION_MODEL, "update", filters={"id": row.get("id")}, data={"checked": True})
+                    entry["adopted"] = True
+                    result["auto_checked"] = _as_int(result.get("auto_checked")) + 1
+                    budget -= 1
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(f"自动勾选失败 {row.get('id')}: {exc}")
+            log_entries.append(entry)
+        if cfg.auto_check_log and log_entries:
+            try:
+                existing = self._read_json(self._data_path("auto_checked.json"), [])
+                if not isinstance(existing, list):
+                    existing = []
+                existing.extend(log_entries)
+                self._write_json(self._data_path("auto_checked.json"), existing[-500:])
+            except Exception:  # noqa: BLE001
+                pass
+
 
     # ===== 表情包模块 =====
 
@@ -1933,9 +2343,21 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "- 总长度不超过 100 字，不要编造看不清的内容；",
             "- 只输出 JSON 数组，不要解释。示例：",
             '[{"id":1,"description":"一只猫趴在薯条上｜标签：自嘲/看戏；场景：被调侃想躺平时"}]',
-            "",
-            "表情：",
         ]
+        try:
+            cfg_ctx = self.config.emoji
+            if int(cfg_ctx.context_lines) > 0:
+                streams = await self._chat_streams("group", 1)
+                session_id = _text(streams[0].get("session_id")) if streams else ""
+                ctx_lines = await self._expression_context_lines(session_id, int(cfg_ctx.context_lines))
+                if ctx_lines:
+                    lines.append("")
+                    lines.append("这个群的近期聊天（用于判断表情适用场景，不要照抄）：")
+                    lines.extend(f"- {entry}" for entry in ctx_lines)
+        except Exception:  # noqa: BLE001
+            pass
+        lines.append("")
+        lines.append("表情：")
         for row in batch:
             lines.append(f'- id={row.get("id")} 描述：{_text(row.get("description"))[:100]}')
         try:
@@ -1995,6 +2417,35 @@ class LearningKeeperPlugin(MaiBotPlugin):
             return ""
         value = raw.get("value") if isinstance(raw, dict) else raw
         return _text(value)
+
+    async def _persona_text(self) -> str:
+        """读取宿主人格设定，拼成表达严判用的角色描述（只走 config.get 能力）。"""
+        if self._persona_cache is not None:
+            return self._persona_cache
+        cfg = self.config.expression
+        cap = max(200, int(getattr(cfg, "persona_max_chars", 1200) or 1200))
+        parts: List[str] = []
+        used = 0
+        for key in (
+            "personality.personality",
+            "personality.behavior_style",
+            "personality.reply_style",
+            "chat.reply_style.group_chat_prompt",
+        ):
+            if used >= cap:
+                break
+            try:
+                raw = await self.ctx.call_capability("config.get", key=key, default="")
+            except Exception:  # noqa: BLE001
+                raw = ""
+            value = raw.get("value") if isinstance(raw, dict) else raw
+            text = _text(value).strip()
+            if not text:
+                continue
+            parts.append(text)
+            used += len(text)
+        self._persona_cache = "\n".join(parts)[:cap]
+        return self._persona_cache
 
     async def _person_id(self, user_id: str, platform: str = "qq") -> str:
         """QQ 号 → 宿主 person_id（跨群/私聊同一人）。"""
