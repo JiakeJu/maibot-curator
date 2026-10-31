@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.jiakeju.maibot-curator",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "name": "麦麦很好奇（Memory Keeper）",
   "description": "后台整理插件：学习群里的黑话、表达方式与表情包，按角色性格精选、查重合并，并整理群友日程。支持 WebUI 配置与 dry-run（只出报告、不改库）。",
   "author": {
@@ -41,7 +41,9 @@
     "message.get_by_time_in_chat",
     "chat.get_group_streams",
     "chat.get_private_streams",
-    "person.get_id"
+    "person.get_id",
+    "web.search",
+    "web.fetch"
   ],
   "i18n": {
     "default_locale": "zh-CN"

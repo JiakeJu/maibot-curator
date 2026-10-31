@@ -33,7 +33,8 @@
   自证层          _group_stream_ids / _stream_usage_lines / _verify_query_variants / _verify_targets
   黑话模块        _run_jargon / _jargon_evidence / _jargon_judge_batch / _jargon_prompt /
                   _parse_jargon_decisions / _jargon_verify_rounds / _jargon_apply
-  联网检索        _search_credentials / _http_json / _web_search_term / 缓存
+  联网检索        _search_credentials / _http_json / _web_search_host / _web_fetch_host /
+                  _web_search_term / 缓存（不填 api_key 时走宿主「联网服务」提供的 web.search）
   表达模块        _run_expression（聚类合并 → LLM 判质量 → 写回 → 自证）/ _expression_judge
   表情模块        _run_emoji（去重 → 补描述 → 自证）/ _emoji_enrich
   入口            create_plugin()
@@ -57,7 +58,8 @@
 == 设计原则 ==
   - 全部通过宿主 capability（database/llm/message/chat）访问，不直接 import 宿主内部模块；
   - 写库前先出报告，所有写回都有上限：黑话/表达/表情用 max_writes_per_run，日程归档用 max_archive_per_run；
-  - 联网只使用插件自己配置的 [web] api_key（留空=不联网），检索结果命中缓存后复用，避免重复花费；
+  - 联网默认走宿主「联网服务」提供的 web.search / web.fetch 能力（不读取宿主安装目录里的任何配置文件、也不需要用宿主 Key）；
+    想用自己申请的 Key 直连 DeepSeek 时，在 [web] api_key 里填写即可；检索结果命中缓存后复用，避免重复花费；
   - 任何一个模块出错只记录到 errors，不影响其他模块。
 """
 
@@ -207,7 +209,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="插件总开关（true/false，默认 true；关闭后不再巡检，也不再注入上下文）")
-    config_version: str = Field(default="0.1.4", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
+    config_version: str = Field(default="0.1.5", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
 
 
 class ScheduleConfig(PluginConfigBase):
@@ -253,21 +255,22 @@ class JargonConfig(PluginConfigBase):
 class WebSearchConfig(PluginConfigBase):
     """联网检索配置（三个模块的自证共用：黑话补含义、表达/表情交叉验证）。
 
-    本插件不读取宿主的任何配置文件；联网检索只使用下面 [web] 里填写的 api_key / base_url。
-    不填 api_key 时联网检索会自动跳过，只使用群内用法证据（见 README「配置」一节）。
+    默认使用宿主「联网服务」提供的联网工具（web.search / web.fetch），无需自备 Key，
+    也不读取宿主安装目录里的任何配置文件；如果你有自己的 DeepSeek Key，也可以填在下面
+    api_key 里让插件直连 DeepSeek。两种方式都不可用时，联网检索自动跳过、只使用群内证据。
     """
 
     __ui_label__ = "联网检索"
     __ui_icon__ = "globe"
     __ui_order__ = 3
 
-    enabled: bool = Field(default=True, description="联网检索总开关（true/false，默认 true；未填写 api_key 时即使开启也只使用群内证据）")
-    api_key: str = Field(default="", description="DeepSeek API Key，联网检索自证用（示例：sk-xxxx；在 platform.deepseek.com 自行申请；留空=不联网，只用群内证据）")
-    base_url: str = Field(default="", description="DeepSeek API 地址（留空=默认 https://api.deepseek.com；仅建议填写可信的 API 地址）")
+    enabled: bool = Field(default=True, description="联网检索总开关（true/false，默认 true；关闭后三个模块的自证都只使用群内证据）")
+    api_key: str = Field(default="", description="可选的 DeepSeek API Key（示例：sk-xxxx，在 platform.deepseek.com 自行申请）；留空=使用宿主「联网服务」配置的联网工具，推荐")
+    base_url: str = Field(default="", description="仅在填写 api_key 时生效：直连的 DeepSeek API 地址（留空=默认 https://api.deepseek.com；仅建议填写可信的 API 地址）")
     timeout_seconds: int = Field(default=25, description="单次联网请求超时（秒，默认 25；范围 1–120）")
     per_term_results: int = Field(default=3, description="每个词最多取几条搜索结果（默认 3；范围 1–10）")
     max_searches_per_run: int = Field(default=6, description="单次巡检最多联网检索多少个词（默认 6；范围 0–50）")
-    fetch_top_page: bool = Field(default=True, description="是否抓取排名第一结果的正文字摘要（true/false，默认 true）")
+    fetch_top_page: bool = Field(default=True, description="是否抓取排名第一结果的正文摘要（true/false，默认 true；宿主模式用 web.fetch，直连模式用 /v1/tools/fetch）")
     cache_ttl_hours: int = Field(default=720, description="检索结果缓存时长（小时，默认 720=30 天；范围 1–8760；避免重复花费）")
     verification_rounds: int = Field(default=2, description="多轮自证轮数（默认 2；范围 1–5；各轮结果一致才固定含义）")
     verify_terms_per_run: int = Field(default=4, description="单次最多对多少个词做多轮自证（默认 4；范围 0–50）")
@@ -371,6 +374,11 @@ class AgendaConfig(PluginConfigBase):
     relative_window_hours: int = Field(default=36, description="「明天/周末」这类只有日期的观察窗（小时，默认 36；范围 1–336）")
     purge_closed_days: int = Field(default=3, description="取消/丢弃的记录保留几天后删除（天，默认 3；范围 1–90）")
     purge_archived_days: int = Field(default=7, description="归档记录保留几天后删除（天，默认 7；范围 1–365；人物卡记忆保留）")
+    state_enabled: bool = Field(default=True, description="是否抽取并记录群友的短时状态/近况（在加班、感冒、考试周、出差、心情不好等），用于接话更准（true/false，默认 true）")
+    state_ttl_hours: int = Field(default=48, description="短时近况保留多久（小时，默认 48；范围 2–168；期间没人再提就淡忘，不进人物卡）")
+    state_max_events: int = Field(default=6, description="注入时最多带几条群友近况（默认 6；范围 1–20）")
+    state_confirm_confidence: float = Field(default=0.6, description="近况第一次被提到时，置信度达到多少就记下（默认 0.6；范围 0–1）")
+    care_enabled: bool = Field(default=True, description="近况偏负面（生病/累/难过）时，是否在注入里给一句关心提示（true/false，默认 true）")
     inject: bool = Field(default=True, description="是否在聊天请求前注入最近安排（true/false，默认 true）")
 
 
@@ -386,7 +394,11 @@ class InjectConfig(PluginConfigBase):
     in_replyer: bool = Field(default=True, description="replyer 请求前注入（true/false，默认 true）")
     agenda: bool = Field(default=True, description="注入最近安排（true/false，默认 true）")
     max_events: int = Field(default=5, description="注入的日程条数上限（默认 5；范围 1–20）")
-    max_chars: int = Field(default=420, description="注入块总字数上限，超了截断（默认 420；范围 80–2000）")
+    max_chars: int = Field(default=600, description="注入块总字数上限，超了截断（默认 600；范围 100–2000）")
+    states: bool = Field(default=True, description="注入群友近况/短时状态（true/false，默认 true）")
+    care: bool = Field(default=True, description="近况偏负面时注入一句关心提示（true/false，默认 true）")
+    persona_style: bool = Field(default=True, description="注入时提醒模型用 bot 自己的人格口吻接话（true/false，默认 true）")
+    persona_max_chars: int = Field(default=260, description="注入时引用人格设定的字数上限（默认 260；范围 80–1000）")
 
 
 class LearningKeeperPluginConfig(PluginConfigBase):
@@ -1550,37 +1562,14 @@ class LearningKeeperPlugin(MaiBotPlugin):
         self._web_cache[key] = {"ts": time.time(), "data": data}
         self._write_json(self._data_path("web_cache.json"), self._web_cache)
 
-    async def _web_search_term(self, term: str, query: Optional[str] = None) -> Dict[str, Any]:
-        query = (query or f"{term} 什么意思 网络用语")[:120]
-        cache_key = self._web_cache_key(term, query)
-        cached = self._cache_get(cache_key)
-        if cached:
-            return cached
-        api_key, base_url = self._search_credentials()
-        if not api_key:
-            if not getattr(self, "_web_warned", False):
-                self._web_warned = True
-                self.ctx.logger.warning(
-                    "[maibot-curator] 未配置 [web] api_key，联网检索已跳过（只使用群内证据）"
-                )
-            return {}
-        if httpx is None:
-            if not getattr(self, "_web_warned", False):
-                self._web_warned = True
-                self.ctx.logger.warning(
-                    "[maibot-curator] 当前运行环境缺少 httpx，联网检索已跳过（只使用群内证据）"
-                )
-            return {}
-        base = base_url.rstrip("/")
-        if not base.endswith("/v1"):
-            base += "/v1"
-        data = await self._http_json(
-            f"{base}/tools/search",
-            {"query": query, "count": max(1, int(self.config.web.per_term_results)), "need_content": True},
-            api_key,
-        )
-        results = []
-        for item in (data.get("results") or [])[: max(1, int(self.config.web.per_term_results))]:
+    @staticmethod
+    def _parse_web_results(data: Dict[str, Any], limit: int) -> List[Dict[str, str]]:
+        """把宿主 web.search / 直连 /tools/search 的结果统一成同样的结构。"""
+        results: List[Dict[str, str]] = []
+        items = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return results
+        for item in items[: max(1, limit)]:
             if not isinstance(item, dict):
                 continue
             results.append(
@@ -1591,19 +1580,97 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     "summary": _text(item.get("summary")),
                 }
             )
-        info: Dict[str, Any] = {"query": query, "results": results}
-        if results and self.config.web.fetch_top_page:
-            top_url = results[0].get("url")
-            if top_url:
-                try:
-                    page = await self._http_json(f"{base}/tools/fetch", {"url": top_url}, api_key)
+        return results
+
+    async def _web_search_host(self, query: str) -> Dict[str, Any]:
+        """走宿主统一联网服务（web.search / web.fetch 能力），不需要插件自己配 Key。"""
+        timeout_ms = max(5, int(self.config.web.timeout_seconds)) * 1000
+        limit = max(1, int(self.config.web.per_term_results))
+        data = await self.ctx.call_capability(
+            "web.search",
+            query=query,
+            max_results=limit,
+            timeout_ms=timeout_ms,
+        )
+        results = self._parse_web_results(data if isinstance(data, dict) else {}, limit)
+        info: Dict[str, Any] = {"query": query, "results": results, "source": "host"}
+        if results and self.config.web.fetch_top_page and results[0].get("url"):
+            try:
+                page = await self.ctx.call_capability(
+                    "web.fetch",
+                    url=results[0]["url"],
+                    timeout_ms=timeout_ms,
+                )
+                if isinstance(page, dict):
                     info["page"] = {
                         "title": _text(page.get("title")),
                         "content": _text(page.get("content"))[:WEB_FETCH_MAX_CHARS],
                     }
-                except Exception:  # noqa: BLE001 - 抓正文失败不影响搜索结论
-                    info["page"] = {}
-        self._cache_put(cache_key, info)
+            except Exception:  # noqa: BLE001 - 抓正文失败不影响搜索结论
+                info["page"] = {}
+        return info
+
+    async def _web_search_direct(self, query: str, api_key: str, base_url: str) -> Dict[str, Any]:
+        """填了 [web] api_key 时：插件直连 DeepSeek 的 /v1/tools/search。"""
+        base = base_url.rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
+        limit = max(1, int(self.config.web.per_term_results))
+        data = await self._http_json(
+            f"{base}/tools/search",
+            {"query": query, "count": limit, "need_content": True},
+            api_key,
+        )
+        results = self._parse_web_results(data if isinstance(data, dict) else {}, limit)
+        info: Dict[str, Any] = {"query": query, "results": results, "source": "direct"}
+        if results and self.config.web.fetch_top_page and results[0].get("url"):
+            try:
+                page = await self._http_json(f"{base}/tools/fetch", {"url": results[0]["url"]}, api_key)
+                if isinstance(page, dict):
+                    info["page"] = {
+                        "title": _text(page.get("title")),
+                        "content": _text(page.get("content"))[:WEB_FETCH_MAX_CHARS],
+                    }
+            except Exception:  # noqa: BLE001 - 抓正文失败不影响搜索结论
+                info["page"] = {}
+        return info
+
+    async def _web_search_term(self, term: str, query: Optional[str] = None) -> Dict[str, Any]:
+        query = (query or f"{term} 什么意思 网络用语")[:120]
+        cache_key = self._web_cache_key(term, query)
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
+        api_key, base_url = self._search_credentials()
+        if api_key:
+            if httpx is None:
+                if not getattr(self, "_web_warned", False):
+                    self._web_warned = True
+                    self.ctx.logger.warning(
+                        "[maibot-curator] 当前运行环境缺少 httpx，联网检索已跳过（只使用群内证据）"
+                    )
+                return {}
+            try:
+                info = await self._web_search_direct(query, api_key, base_url)
+            except Exception as exc:  # noqa: BLE001
+                if not getattr(self, "_web_warned", False):
+                    self._web_warned = True
+                    self.ctx.logger.warning(
+                        f"[maibot-curator] 直连 DeepSeek 联网失败（{exc}），本轮只使用群内证据"
+                    )
+                return {}
+        else:
+            try:
+                info = await self._web_search_host(query)
+            except Exception as exc:  # noqa: BLE001
+                if not getattr(self, "_web_warned", False):
+                    self._web_warned = True
+                    self.ctx.logger.warning(
+                        f"[maibot-curator] 宿主联网服务不可用（{exc}），本轮只使用群内证据"
+                    )
+                return {}
+        if info.get("results"):
+            self._cache_put(cache_key, info)
         return info
 
     # ===== 表达方式模块 =====
@@ -2828,8 +2895,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
         now: float,
         chat_id: str,
         chat_name: str,
+        event_kind: str = "plan",
     ) -> Dict[str, Any]:
-        """新建一条待办（pending）。"""
+        """新建一条记录（plan=日程/待办，state=短时近况），默认 pending。"""
         base = float(base_ts or now)
         if due_ts:
             resolve_by = due_ts + max(1.0, float(self.config.agenda.candidate_ttl_hours)) * 3600
@@ -2849,6 +2917,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "chat_id": chat_id,
             "chat_name": chat_name,
             "status": "pending",
+            "kind": event_kind,
             "confidence": round(_as_float(item.get("confidence")), 3),
             "mentions": 1,
             "evidence": [f"{stamp} 原话：{_text(item.get('evidence'))[:60] or content[:60]}"],
@@ -2892,7 +2961,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 continue
             status = _text(event.get("status"))
             closed = _as_float(event.get("closed_ts") or event.get("archived_ts"))
-            if status in ("cancelled", "dropped") and closed and now - closed > keep_closed:
+            if status in ("cancelled", "dropped", "expired") and closed and now - closed > keep_closed:
                 purged += 1
                 continue
             if status == "archived" and closed and now - closed > keep_archived:
@@ -2932,6 +3001,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "archived": 0,
             "deferred": 0,
             "purged": 0,
+            "state_new": 0,
+            "state_update": 0,
+            "state_expired": 0,
             "errors": [],
             "summary": "",
         }
@@ -2992,21 +3064,27 @@ class LearningKeeperPlugin(MaiBotPlugin):
             result["summary"] = "最近没有可扫描的消息"
             return result
         prompt = (
-            "你在帮 QQ 机器人维护一份「群友日程 / 待办」清单。请从下面的群聊片段里，找出每个群友"
-            "自己正在做、准备做、计划做，或者刚做完的事。\n"
+            "你在帮 QQ 机器人维护一份「群友近况 / 日程」清单。请从下面的群聊片段里找出两类信息：\n"
+            "A. 日程/待办：某个群友自己正在做、准备做、计划做，或者刚做完的、有时效的事。\n"
+            "B. 短时近况/状态：某个群友最近几小时到两三天的状态，比如在加班、感冒了、考试周、出差、"
+            "刚搬完家、最近心情不好、在找工作、在等结果等。这类不需要时间，但要能帮机器人下次接话更准。\n"
             "规则：\n"
-            "1) 只记和他本人有关、有时效的事；不要记新闻、不要评论别人、不要猜。\n"
-            "2) time_kind 分类：exact=能确定到具体时刻；relative=只有今天/明天/周末这种日期；"
+            "1) 只记和他本人有关、有时效的信息；不要记新闻、不要评论别人、不要猜。\n"
+            "2) kind=plan 表示日程（按下面时间规则）；kind=state 表示短时近况。\n"
+            "3) 日程 time_kind：exact=确定到具体时刻；relative=只有今天/明天/周末这种日期；"
             "abstract=只有一会儿/之后/回头/晚点/等会这种模糊说法；none=没有时间信息。\n"
-            "3) action 分类：plan=新计划；update=补充或修改已有计划；cancel=明确取消（不去了/算了/改主意）；"
+            "4) 日程 action：plan=新计划；update=补充或修改已有计划；cancel=明确取消（不去了/算了/改主意）；"
             "done=已经做完/刚做完/已经去过。\n"
-            "4) 如果能对上“已有清单”里的某条，带上它的 target_id；不确定就不要带。\n"
-            "5) confidence 0~1：犹豫、玩笑、别人替他说的、只说“可能”都要低分。\n"
-            "6) 犹犹豫豫、商量中、最后没定的事不要输出；玩笑不要输出。\n"
+            "5) 近况 polarity：positive=好事/开心；neutral=中性；negative=生病/累/难过/烦/压力大等。\n"
+            "6) 近况要给 topic（一两个词，如 加班/感冒/考试），方便以后对上话题。\n"
+            "7) 如果能对上「已有清单」里的某条，带上它的 target_id；不确定就不要带。\n"
+            "8) confidence 0~1：犹豫、玩笑、别人替他说的、只说“可能”都要低分；"
+            "犹犹豫豫、商量中、最后没定的事不要输出；玩笑不要输出。\n"
             "只输出 JSON 数组，每项："
-            '{"user_id":"发言里的QQ号","person_name":"昵称","content":"一句话安排",'
+            '{"user_id":"发言里的QQ号","person_name":"昵称","kind":"plan/state","content":"一句话",'
             '"time_kind":"exact/relative/abstract/none","time_hint":"原文时间说法，没有就空",'
             '"due_iso":"能确定就写ISO，否则空","action":"plan/update/cancel/done",'
+            '"polarity":"positive/neutral/negative","topic":"关键词",'
             '"target_id":"对应已有条目id或空","confidence":0.0,"evidence":"原话片段"}\n\n'
             "已有清单：\n" + ("\n".join(known_lines) if known_lines else "（空）") + "\n\n"
             "群聊片段：\n" + "\n".join(lines[-120:])
@@ -3041,6 +3119,57 @@ class LearningKeeperPlugin(MaiBotPlugin):
             base_ts = _as_float(rows[-1].get("timestamp")) if rows else now
             chat_id = _text(rows[-1].get("_chat_id")) if rows else ""
             chat_name = _text(rows[-1].get("_chat_name")) if rows else ""
+            if _text(item.get("kind")).lower() == "state":
+                if not bool(getattr(cfg, "state_enabled", True)):
+                    continue
+                polarity = _text(item.get("polarity")).lower()
+                if polarity not in ("positive", "neutral", "negative"):
+                    polarity = "neutral"
+                topic = _text(item.get("topic"))[:24]
+                state_threshold = float(getattr(cfg, "state_confirm_confidence", 0.6))
+                state_target = None
+                for event in known:
+                    if _text(event.get("kind")) != "state":
+                        continue
+                    if _text(event.get("person_id")) != person_id:
+                        continue
+                    if self._agenda_similar(_text(event.get("content")), content):
+                        state_target = event
+                        break
+                if state_target is None:
+                    state_target = self._agenda_new_event(
+                        item, uid, person_id, content, "", "none", 0.0, base_ts, now,
+                        chat_id, chat_name, event_kind="state",
+                    )
+                    state_target["polarity"] = polarity
+                    state_target["topic"] = topic
+                    if confidence >= state_threshold:
+                        state_target["status"] = "confirmed"
+                        state_target["confirmed_ts"] = now
+                    events.append(state_target)
+                    known.append(state_target)
+                    result["state_new"] += 1
+                else:
+                    state_target["mentions"] = _as_int(state_target.get("mentions")) + 1
+                    state_target["last_mentioned_ts"] = now
+                    state_target["confidence"] = max(_as_float(state_target.get("confidence")), confidence)
+                    if polarity != "neutral":
+                        state_target["polarity"] = polarity
+                    if topic:
+                        state_target["topic"] = topic
+                    if len(content) > len(_text(state_target.get("content"))):
+                        state_target["content"] = content
+                    state_evidence = state_target.get("evidence") if isinstance(state_target.get("evidence"), list) else []
+                    state_evidence.append(f"{time.strftime('%m-%d %H:%M', time.localtime(base_ts))} 原话：{content[:60]}")
+                    state_target["evidence"] = state_evidence[-6:]
+                    if _text(state_target.get("status")) == "pending" and (
+                        _as_int(state_target.get("mentions")) >= max(1, int(cfg.confirm_min_hits))
+                        or confidence >= state_threshold
+                    ):
+                        state_target["status"] = "confirmed"
+                        state_target["confirmed_ts"] = now
+                    result["state_update"] += 1
+                continue
             due_ts = _parse_iso_ts(item.get("due_iso"))
             kind = _text(item.get("time_kind")).lower()
             if not due_ts:
@@ -3126,6 +3255,13 @@ class LearningKeeperPlugin(MaiBotPlugin):
             due = _as_float(event.get("due_ts"))
             last = _as_float(event.get("last_mentioned_ts") or event.get("created_ts"))
             if status == "confirmed":
+                if _text(event.get("kind")) == "state":
+                    state_ttl = float(getattr(cfg, "state_ttl_hours", 48)) * 3600
+                    if last and now - last > state_ttl:
+                        event["status"] = "expired"
+                        event["closed_ts"] = now
+                        result["state_expired"] += 1
+                    continue
                 if due and now > due + float(cfg.expire_hours) * 3600:
                     if await try_archive(event, "已结束"):
                         result["archived"] += 1
@@ -3148,7 +3284,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
             f"扫描 {result['scanned']} 条，抽取 {result['extracted']}；"
             f"待办 +{result['pending_new']} / 更新 {result['pending_update']}；"
             f"确认 {result['confirmed']}，完成 {result['done']}，取消 {result['cancelled']}，"
-            f"丢弃 {result['dropped']}，归档 {result['archived']}，清理 {result['purged']}"
+            f"丢弃 {result['dropped']}，归档 {result['archived']}，清理 {result['purged']}；"
+            f"近况 +{result['state_new']} / 更新 {result['state_update']} / 淡忘 {result['state_expired']}"
             f"（{'只报告，未写人物卡' if dry_run else '已写回'}）"
         )
         if result["deferred"]:
@@ -3160,6 +3297,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 "who": _text(event.get("person_name")),
                 "content": _text(event.get("content"))[:60],
                 "status": _text(event.get("status")),
+                "kind": _text(event.get("kind")) or "plan",
                 "time": _text(event.get("time_hint")),
             }
             for event in events
@@ -3168,7 +3306,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
         return result
 
     async def _build_injection_block(self, kwargs: Dict[str, Any]) -> str:
-        """组装「最近的安排」一段背景信息；没有内容就返回空串。"""
+        """组装「最近的安排 / 群友近况 / 关心提示」，并提醒用 bot 自己的口吻接话。"""
         cfg = self.config.inject
         if not cfg.enabled:
             return ""
@@ -3221,12 +3359,14 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 if len(person_ids) >= 2:
                     break
         parts: List[str] = []
+        now_ts = time.time()
+        agenda_cfg = self.config.agenda
         if cfg.agenda:
-            now_ts = time.time()
-            expire_hours = float(self.config.agenda.expire_hours)
+            expire_hours = float(agenda_cfg.expire_hours)
             active = [
                 event for event in self._agenda_events()
                 if isinstance(event, dict)
+                and _text(event.get("kind")) != "state"
                 and event.get("status") == "confirmed"
                 and (
                     not _as_float(event.get("due_ts"))
@@ -3250,13 +3390,61 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 lines.append(f"- {who}：{(hint + ' ' + content).strip()}".strip())
             if lines:
                 parts.append("【最近的安排】\n" + "\n".join(lines))
+        if bool(getattr(cfg, "states", True)) and bool(getattr(agenda_cfg, "state_enabled", True)):
+            state_ttl = float(getattr(agenda_cfg, "state_ttl_hours", 48)) * 3600
+            state_limit = max(1, int(getattr(agenda_cfg, "state_max_events", 6)))
+            states = []
+            for event in self._agenda_events():
+                if not isinstance(event, dict):
+                    continue
+                if _text(event.get("kind")) != "state":
+                    continue
+                if _text(event.get("status")) != "confirmed":
+                    continue
+                last = _as_float(event.get("last_mentioned_ts") or event.get("created_ts"))
+                if last and now_ts - last > state_ttl:
+                    continue
+                if session_id and _text(event.get("chat_id")) == session_id:
+                    states.append(event)
+                elif _text(event.get("person_id")) in person_ids:
+                    states.append(event)
+            states.sort(
+                key=lambda item: _as_float(item.get("last_mentioned_ts") or item.get("created_ts")),
+                reverse=True,
+            )
+            state_lines: List[str] = []
+            low_mood: List[str] = []
+            for event in states[:state_limit]:
+                who = _text(event.get("person_name")) or "群友"
+                content = _text(event.get("content"))
+                last = _as_float(event.get("last_mentioned_ts") or event.get("created_ts"))
+                age = ""
+                if last:
+                    hours = (now_ts - last) / 3600
+                    if hours < 1:
+                        age = "（刚提过）"
+                    elif hours < 48:
+                        age = f"（约{int(hours)}小时前提过）"
+                state_lines.append(f"- {who}：{content}{age}")
+                if _text(event.get("polarity")) == "negative" and who not in low_mood:
+                    low_mood.append(who)
+            if state_lines:
+                parts.append("【群友近况】\n" + "\n".join(state_lines))
+            if low_mood and bool(getattr(cfg, "care", True)) and bool(getattr(agenda_cfg, "care_enabled", True)):
+                parts.append(
+                    "【关心提示】" + "、".join(low_mood[:3]) + " 最近状态可能不太好。"
+                    "如果这轮要接话，可以用你自己的话轻轻关心一句，别追问、别说教。"
+                )
         if not parts:
             return ""
-        block = (
-            "以下是背景信息，帮你接话更自然；只在相关时用一句，不要复述、不要说“我记得”。\n"
-            + "\n".join(parts)
-        )
-        return block[: max(120, int(cfg.max_chars))]
+        header = "以下是背景信息，帮你接话更自然；只在相关时用一句，不要复述、不要说“我记得”。"
+        if bool(getattr(cfg, "persona_style", True)):
+            nickname = await self._bot_nickname()
+            persona = (await self._persona_text())[: max(80, int(getattr(cfg, "persona_max_chars", 260)))].strip()
+            if persona:
+                header += f"\n用你自己的口吻（{nickname or '你自己'}：{persona}）来接，不要照搬上面的话。"
+        block = header + "\n" + "\n".join(parts)
+        return block[: max(160, int(cfg.max_chars))]
 
     async def _inject_context(self, kwargs: Dict[str, Any], flag: str) -> Dict[str, Any]:
         """把背景信息插入到最后一条 SystemMessageItem 之后（planner / replyer 共用）。"""

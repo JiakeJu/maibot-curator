@@ -10,7 +10,7 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 
 - MaiBot `>= 1.3.0`（开发/测试环境：MaiBot 1.3.15、SDK 2.16.0）
 - Plugin SDK `>= 2.8.0`
-- 不新增第三方依赖：联网复用宿主自带的 `httpx`（缺失时自动只使用群内证据），LLM/embedding 走宿主能力
+- 不新增第三方依赖：联网默认走宿主「联网服务」提供的联网工具（`web.search` / `web.fetch` 能力），无需自备 Key；也可以填 `[web] api_key` 让插件直连 DeepSeek（用宿主自带的 `httpx`，缺失或联网都不可用时自动只使用群内证据）。LLM/embedding 走宿主能力
 
 ## 功能
 
@@ -19,11 +19,13 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 | 黑话（jargon） | 从上下文里取证据 → 首轮判定 → 群内用法 + 联网 2 轮多源自证 → 高置信才写 `meaning`；碎片/常见词删除 | 每 6 小时 |
 | 表达（expression） | embedding 聚类合并近似条目，LLM 判定质量/改写场景，删除无意义表达（默认不自动勾选） | 每周 |
 | 表情（emoji） | 为表情生成「画面描述｜标签｜适用场景」，近似重复保留常用的、其余取消注册 | 每月 |
-| 日程（agenda） | 抽取群聊里的短期安排，`pending → confirmed → done/cancelled`，确认后才允许注入上下文；结束归档到人物卡并定时清理 | 每小时 |
+| 群友近况 / 日程（agenda） | 抽取群聊里的短期安排与群友短时状态（在加班、感冒、考试周、出差、心情不好等），`pending → confirmed → done/cancelled`，确认后才允许注入上下文；日程结束归档到人物卡，近况到期自动淡忘 | 每小时 |
 
-多轮多源自证：每条候选同时看「群内用法（真实消息证据）」和「联网检索（多种问法）」，两边一致才锁定；联网检索通过 DeepSeek 的 `/v1/tools/search` 完成（可选 `fetch_top_page`，用 `/v1/tools/fetch` 抓首条正文），也可只用群内证据。
+多轮多源自证：每条候选同时看「群内用法（真实消息证据）」和「联网检索（多种问法）」，两边一致才锁定；联网默认走宿主的统一联网服务（`web.search` / `web.fetch` 能力，和宿主自己的联网工具共用同一套服务与 Key，插件无需再配置 Key），也可以在 `[web] api_key` 填自己的 DeepSeek Key 让插件直连 `/v1/tools/search`；可选 `fetch_top_page` 抓首条正文，也可只用群内证据。
 
 日程不会瞎猜：一会儿/待会/之后这类抽象时间进入观察窗（默认 24h），由后续聊天证据决定是否确认；明确的日期/时刻才直接确认。只有 `confirmed` 的事件会出现在上下文里，避免把「没定的事」说成事实。
+
+群友近况是「短时印象」：只记几个小时到一两天内和这个人有关的状态（在加班、感冒、考试周、出差、心情不好、刚搬完家……），不要求具体时间；默认保留 48 小时没人再提就淡忘，不进人物卡。注入时会带上「约几小时前提过」，最近状态偏负面时附一句关心提示；所有注入内容都会提醒模型「用你自己的口吻来接」，可减少群里那种生硬复述感。
 
 ## 安装
 
@@ -42,7 +44,7 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 | 参数 | 说明 | 默认 |
 |---|---|---|
 | `enabled` | 插件总开关（true/false，默认 true；关闭后不再巡检，也不再注入上下文） | `true` |
-| `config_version` | 配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改） | `0.1.4` |
+| `config_version` | 配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改） | `0.1.5` |
 
 ### 调度
 
@@ -80,13 +82,13 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
-| `enabled` | 联网检索总开关（true/false，默认 true；未填写 api_key 时即使开启也只使用群内证据） | `true` |
-| `api_key` | DeepSeek API Key，联网检索自证用（示例：sk-xxxx；在 platform.deepseek.com 自行申请；留空=不联网，只用群内证据） | `""` |
-| `base_url` | DeepSeek API 地址（留空=默认 https://api.deepseek.com；仅建议填写可信的 API 地址） | `""` |
+| `enabled` | 联网检索总开关（true/false，默认 true；关闭后三个模块的自证都只使用群内证据） | `true` |
+| `api_key` | 可选的 DeepSeek API Key（示例：sk-xxxx，在 platform.deepseek.com 自行申请）；留空=使用宿主「联网服务」配置的联网工具，推荐 | `""` |
+| `base_url` | 仅在填写 api_key 时生效：直连的 DeepSeek API 地址（留空=默认 https://api.deepseek.com；仅建议填写可信的 API 地址） | `""` |
 | `timeout_seconds` | 单次联网请求超时（秒，默认 25；范围 1–120） | `25` |
 | `per_term_results` | 每个词最多取几条搜索结果（默认 3；范围 1–10） | `3` |
 | `max_searches_per_run` | 单次巡检最多联网检索多少个词（默认 6；范围 0–50） | `6` |
-| `fetch_top_page` | 是否抓取排名第一结果的正文字摘要（true/false，默认 true） | `true` |
+| `fetch_top_page` | 是否抓取排名第一结果的正文摘要（true/false，默认 true；宿主模式用 web.fetch，直连模式用 /v1/tools/fetch） | `true` |
 | `cache_ttl_hours` | 检索结果缓存时长（小时，默认 720=30 天；范围 1–8760；避免重复花费） | `720` |
 | `verification_rounds` | 多轮自证轮数（默认 2；范围 1–5；各轮结果一致才固定含义） | `2` |
 | `verify_terms_per_run` | 单次最多对多少个词做多轮自证（默认 4；范围 0–50） | `4` |
@@ -171,6 +173,11 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 | `relative_window_hours` | 「明天/周末」这类只有日期的观察窗（小时，默认 36；范围 1–336） | `36` |
 | `purge_closed_days` | 取消/丢弃的记录保留几天后删除（天，默认 3；范围 1–90） | `3` |
 | `purge_archived_days` | 归档记录保留几天后删除（天，默认 7；范围 1–365；人物卡记忆保留） | `7` |
+| `state_enabled` | 是否抽取并记录群友的短时状态/近况（在加班、感冒、考试周、出差、心情不好等），用于接话更准（true/false，默认 true） | `true` |
+| `state_ttl_hours` | 短时近况保留多久（小时，默认 48；范围 2–168；期间没人再提就淡忘，不进人物卡） | `48` |
+| `state_max_events` | 注入时最多带几条群友近况（默认 6；范围 1–20） | `6` |
+| `state_confirm_confidence` | 近况第一次被提到时，置信度达到多少就记下（默认 0.6；范围 0–1） | `0.6` |
+| `care_enabled` | 近况偏负面（生病/累/难过）时，是否在注入里给一句关心提示（true/false，默认 true） | `true` |
 | `inject` | 是否在聊天请求前注入最近安排（true/false，默认 true） | `true` |
 
 ### 上下文注入
@@ -182,23 +189,28 @@ MaiBot 内置的学习功能会不断往库里写东西，但写进来的条目�
 | `in_replyer` | replyer 请求前注入（true/false，默认 true） | `true` |
 | `agenda` | 注入最近安排（true/false，默认 true） | `true` |
 | `max_events` | 注入的日程条数上限（默认 5；范围 1–20） | `5` |
-| `max_chars` | 注入块总字数上限，超了截断（默认 420；范围 80–2000） | `420` |
+| `max_chars` | 注入块总字数上限，超了截断（默认 600；范围 100–2000） | `600` |
+| `states` | 注入群友近况/短时状态（true/false，默认 true） | `true` |
+| `care` | 近况偏负面时注入一句关心提示（true/false，默认 true） | `true` |
+| `persona_style` | 注入时提醒模型用 bot 自己的人格口吻接话（true/false，默认 true） | `true` |
+| `persona_max_chars` | 注入时引用人格设定的字数上限（默认 260；范围 80–1000） | `260` |
 
 **注意**：在 WebUI 插件配置页点「保存」会按 schema 重写 `config.toml`，可能丢掉注释。想保留注释请直接编辑插件目录里的 `config.toml`（插件会自动热加载）；每次保存前 Runner 都会在插件目录的 `config_back/` 留备份，可从中找回。
 
 ## 工作原理
 
-- 通过 `maisaka.planner.before_request` / `maisaka.replyer.before_model_request` Hook，把【最近的安排】按需注入上下文（只注入已确认、且未过期的事件）。
+- 通过 `maisaka.planner.before_request` / `maisaka.replyer.before_model_request` Hook，把【最近的安排】/【群友近况】/【关心提示】按需注入上下文（只注入已确认、且未过期的条目），并用 bot 自己的人格口吻提醒模型接话。
 - 数据库读写、LLM、embedding、消息检索全部走宿主官方 capability（`database.query`、`llm.generate`、`llm.embed`、`message.get_by_time_in_chat`、`chat.get_group_streams`、`config.get`、`person.get_id` 等），不改宿主源码、不直接读取宿主安装目录下的文件（包括 `model_config.toml`）；宿主配置值（如 `bot.nickname`）与数据表只通过官方 capability 只读获取。
 - 运行报告写入 `data/plugins/github.jiakeju.maibot-curator/last_report*.json`；自证台账写入 `*_verified.json`；日程/黑话等状态文件也在这个目录。
 
 ## 成本
 
-闲时成本很低：黑话每 6 小时一次（常规 8–15k token，候选少时更少）；日程每小时一次（1.5–2.6k token，有候选才多）；表达/表情是周/月级。相比节省（去碎片、避免重复学习），整体是净收益；所有模块可单独关闭。
+闲时成本很低：黑话每 6 小时一次（常规 8–15k token，候选少时更少）；日程/近况每小时一次（1.5–2.6k token，有候选才多）；表达/表情是周/月级。相比节省（去碎片、避免重复学习），整体是净收益；所有模块可单独关闭。
 
 ## 版本记录
 
-- `v0.1.4`（2026-10-29）：表达方式新增「人格适配严判」：对会被采用的表达，按宿主人格设定再判一轮，删掉攻击性强、阴阳怪气、适用面窄、与角色不符的条目；新增自动精选模式 `[expression] auto_check_mode`（off/report/on，默认 report 只出候选清单）、置信度门槛、二次复核、单轮勾选上限与 `auto_checked.json` 候选日志；表达判定结合群聊上下文（`context_lines`）；人格判定新增取向开关 `[expression] persona_mode`（conservative=保守学习，优先角色一致性；adapt=主动向群内交流风格靠拢，允许群内流行、干净、不伤人的说法），默认 conservative。，默认每 12 小时跑一次、单轮扫 300 条。黑话改为「先整理再判断」：收录前归一化去重、合并词频、剔除无意义条目，已完成的词条定期复核（`recheck_complete`/`recheck_days`），判定结合群内真实用法与上下文；默认每 4 小时跑一次。表情补描述时也会参考群聊上下文。manifest 简介精简为两句话，技术细节保留在 README。
+- `v0.1.5`（2026-10-31）：联网检索改为默认使用宿主「联网服务」提供的 `web.search` / `web.fetch` 能力（与宿主自己的联网工具共用同一套服务与 Key），插件不再要求自备 DeepSeek API Key；`[web] api_key` 变为可选——留空走宿主、填写则插件直连 DeepSeek；两种方式都不可用时自动跳过联网、只用群内证据。同时「日程」扩展为「群友近况 / 日程」——除日程待办外，还抽取群友的短时状态（在加班、感冒、考试周、出差、心情不好等），默认保留 48 小时、没人再提自动淡忘、不进人物卡；注入新增【群友近况】与【关心提示】（近况偏负面时给一句关心建议），并按 bot 人格设定提醒模型「用你自己的口吻来接」；`[agenda]` 新增 `state_enabled`/`state_ttl_hours`/`state_max_events`/`state_confirm_confidence`/`care_enabled`，`[inject]` 新增 `states`/`care`/`persona_style`/`persona_max_chars` 并把总字数上限默认调到 600。日程抽取 prompt 改为同时识别 `kind=plan/state`，近况带 `polarity`（正/中/负）与 `topic` 关键词；manifest 新增 `web.search` / `web.fetch` 能力声明。
+- `v0.1.4`（2026-10-29）：表达方式新增「人格适配严判」：对会被采用的表达，按宿主人格设定再判一轮，删掉攻击性强、阴阳怪气、适用面窄、与角色不符的条目；新增自动精选模式 `[expression] auto_check_mode`（off/report/on，默认 report 只出候选清单）、置信度门槛、二次复核、单轮勾选上限与 `auto_checked.json` 候选日志；表达判定结合群聊上下文（`context_lines`）；人格判定新增取向开关 `[expression] persona_mode`（conservative=保守学习，优先角色一致性；adapt=主动向群内交流风格靠拢，允许群内流行、干净、不伤人的说法），默认 conservative；默认每 12 小时跑一次、单轮扫 300 条。黑话改为「先整理再判断」：收录前归一化去重、合并词频、剔除无意义条目，已完成的词条定期复核（`recheck_complete`/`recheck_days`），判定结合群内真实用法与上下文；默认每 4 小时跑一次。表情补描述时也会参考群聊上下文。manifest 简介精简为两句话，技术细节保留在 README。
 完整修改日志（含复审反馈、自查项与代码清理细节）见 [CHANGELOG.md](CHANGELOG.md)。
 
 - `v0.1.3`（2026-10-27）：按第 5 轮复审意见补强——`[agenda] max_archive_per_run` 真正生效（每轮最多写多少条人物卡归档，超出部分顺延到下一轮，0=不限制；dry-run 不写人物卡、不受此限），`[web] base_url` 字段描述注明仅建议填写可信的 API 地址；展示名英文副名由 MaiBot Curator 调整为 Memory Keeper（中文名与插件 id 不变）。README 开头新增一句自述；配置说明按 WebUI 面板顺序重写，逐项列出每个参数的含义与取值范围，所有配置字段描述都补上默认值/范围/示例，WebUI 未填写时会直接显示提示。另：配置 Schema 生成时会自动把字段 `description` 回填为 WebUI 的 `hint`，输入框下方直接显示灰色说明（此前只有 description，WebUI 不渲染）；清理旧版遗留的死代码（3 个未调用函数、2 个未使用常量，`plugin.py` 2,974→2,877 行），新增本仓库的 `CHANGELOG.md`。

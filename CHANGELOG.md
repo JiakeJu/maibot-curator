@@ -2,6 +2,31 @@
 
 本文件记录「麦麦很好奇（Memory Keeper）」每次发布的完整改动；README 里的「版本记录」是摘要，这里保留细节（含市场复审反馈、自查项与代码清理），便于回看与升级对照。
 
+## v0.1.5（2026-10-31）
+
+### 联网检索：默认走宿主「联网服务」
+
+- 默认使用宿主「联网服务」提供的 `web.search` / `web.fetch` 能力（与宿主统一联网工具共用同一套服务与 Key），插件不再要求自备 DeepSeek API Key。
+- `[web] api_key` 改为可选——留空=走宿主联网服务（推荐，零配置）；填写=插件直连 DeepSeek `/v1/tools/search`（`base_url` 仅在直连时生效）。两种方式都不可用时自动跳过联网、只使用群内证据，并且只警告一次。
+- manifest：新增 `web.search` / `web.fetch` 能力声明；配置字段说明与 README 同步更新。
+
+### 群友近况 / 短时状态
+
+- `[agenda]` 模块从「日程待办」扩展为「群友近况 / 日程」：抽取 prompt 同时识别 `kind=plan`（日程）与 `kind=state`（短时状态，如加班、感冒、考试周、出差、心情不好、刚搬完家）。
+- 近况字段：`polarity`（positive/neutral/negative）、`topic`（关键词）、`content`、`last_mentioned_ts`；默认保留 `state_ttl_hours=48`，期间没人再提就标记 `expired` 淡忘，不进人物卡。
+- 同一人的同类近况会合并更新（提及次数、最后提及时间、权重更高的 polarity、更完整的 content），证据保留最近 6 条。
+- 新增配置：`state_enabled`、`state_ttl_hours`、`state_max_events`、`state_confirm_confidence`、`care_enabled`；报告新增 `state_new` / `state_update` / `state_expired` 计数。
+
+### 注入改进
+
+- 注入块新增【群友近况】（带「约几小时前提过」）与【关心提示】（负面近况时建议关心一句），并附一句「用你自己的口吻（昵称：人格摘要）来接」。
+- `[inject]` 新增 `states`、`care`、`persona_style`、`persona_max_chars`；总字数上限默认 420→600。
+- 日程/近况仍只注入 `confirmed` 且未过期的条目；dry-run 时只出报告。
+
+### 自查
+
+- 静态 106 项、运行时 134 项、洁净检出 33 项、冗余 0 候选；实例未部署（用户要求先在插件文件夹改动，等明确迭代再发）。
+
 ## v0.1.4（2026-10-29）
 
 - 表达方式：新增人格适配严判（默认开启）：按宿主人格设定对「会被采用」的表达再判一轮，删除攻击性强、阴阳怪气、低俗擦边、适用面窄、与角色不符、纯碎片的条目；dry-run 只报告不删。
