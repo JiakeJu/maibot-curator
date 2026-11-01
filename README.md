@@ -45,16 +45,16 @@
 
 ## 配置
 
-配置由 Runner 在首次加载时按 `config_model` 自动生成到插件目录 `config.toml`（全部字段带中文注释；**仓库不包含该文件**，升级不会覆盖或冲突）。
+配置由 Runner 在首次加载时按 `config_model` 自动生成到插件目录 `config.toml`（全部字段带中文注释；**仓库不包含该文件**，升级不会覆盖/冲突）。
 
-在 WebUI 的插件配置页里，未填写的输入框会直接显示默认值，输入框下方的说明文字就是下表的「说明」列（含取值范围与示例）；配置 Schema 生成时会把字段 `description` 回填为 WebUI 的 `hint`。下面按面板顺序逐项列出：
+在 WebUI 的插件配置页里，未填写的输入框会直接显示默认值，输入框下方的说明文字就是下表的「说明」列（含取值范围与示例）——不用翻文档也能看懂每个参数控制什么。下面按面板顺序逐项列出：
 
 ### 插件
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
 | `enabled` | 插件总开关（true/false，默认 true；关闭后不再巡检，也不再注入上下文） | `true` |
-| `config_version` | 配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改） | `0.1.5` |
+| `config_version` | 配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改） | `0.1.6` |
 
 ### 调度
 
@@ -133,6 +133,7 @@
 | `auto_check_double_check` | 自动采纳前是否二次复核（true/false，默认 true；多一次 LLM 调用换更高准确率） | `true` |
 | `auto_check_max_per_run` | 单次最多自动勾选多少条（默认 10；范围 0–500） | `10` |
 | `auto_check_log` | 是否记录自动勾选清单到 auto_checked.json（true/false，默认 true；便于检查与回滚） | `true` |
+| `auto_check_ui_mark` | 自动采纳时同时把来源标记为 USER，使其出现在 WebUI「仅精选」筛选里（true/false，默认 true；真实来源始终记录在 auto_checked.json；false=只勾选 checked，不显示在仅精选） | `true` |
 | `context_lines` | 判定时参考的群聊上下文条数（默认 6；范围 0–30；0=不参考上下文） | `6` |
 | `persona_mode` | 人格判定取向：conservative=保守学习，优先角色一致性，群内流行但与角色口吻冲突的表达也删；adapt=主动向本群交流风格靠拢，允许群内流行、干净、不伤人的说法（与角色口吻略偏也可采用）；默认 conservative，建议先保守观察一轮再切 adapt | `conservative` |
 
@@ -161,7 +162,7 @@
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
-| `enabled` | 是否启用群友日程（true/false，默认 true；关闭后不读取群消息、不注入，其他模块不受影响） | `true` |
+| `enabled` | 是否启用群友日程（true/false，默认 true） | `true` |
 | `interval_minutes` | 扫描间隔（分钟，默认 60=每小时；范围 1–1440） | `60` |
 | `lookback_hours` | 每次回看最近多少小时的消息（小时，默认 3；范围 1–72） | `3` |
 | `max_streams` | 每轮最多扫几个群/私聊会话（默认 3；范围 1–20） | `3` |
@@ -239,6 +240,7 @@
 
 ## 版本记录
 
+- `v0.1.6`（2026-11-01）：表达自动采纳会同时把来源标记为 USER，因此在 WebUI「仅精选」筛选里可见（真实来源仍记录在 `auto_checked.json`，`auto_check_ui_mark=false` 可关闭该显示）；多轮自证改为按小批次（每批最多 2 条）分别请求 LLM，减少单次提示体积与 120s 硬超时风险；新增 `[expression] auto_check_ui_mark` 配置项。
 - `v0.1.5`（2026-10-31）：联网检索改为默认使用宿主「联网服务」提供的 `web.search` / `web.fetch` 能力（与宿主自己的联网工具共用同一套服务与 Key），插件不再要求自备 DeepSeek API Key；`[web] api_key` 变为可选——留空走宿主、填写则插件直连 DeepSeek；两种方式都不可用时自动跳过联网、只用群内证据。同时「日程」扩展为「群友近况 / 日程」——除日程待办外，还抽取群友的短时状态（在加班、感冒、考试周、出差、心情不好等），默认保留 48 小时、没人再提自动淡忘、不进人物卡；注入新增【群友近况】与【关心提示】（近况偏负面时给一句关心建议），并按 bot 人格设定提醒模型「用你自己的口吻来接」；`[agenda]` 新增 `state_enabled`/`state_ttl_hours`/`state_max_events`/`state_confirm_confidence`/`care_enabled`，`[inject]` 新增 `states`/`care`/`persona_style`/`persona_max_chars` 并把总字数上限默认调到 600。日程抽取 prompt 改为同时识别 `kind=plan/state`，近况带 `polarity`（正/中/负）与 `topic` 关键词；manifest 新增 `web.search` / `web.fetch` 能力声明。
 - `v0.1.4`（2026-10-29）：表达方式新增「人格适配严判」：对会被采用的表达，按宿主人格设定再判一轮，删掉攻击性强、阴阳怪气、适用面窄、与角色不符的条目；新增自动精选模式 `[expression] auto_check_mode`（off/report/on，默认 report 只出候选清单）、置信度门槛、二次复核、单轮勾选上限与 `auto_checked.json` 候选日志；表达判定结合群聊上下文（`context_lines`）；人格判定新增取向开关 `[expression] persona_mode`（conservative=保守学习，优先角色一致性；adapt=主动向群内交流风格靠拢，允许群内流行、干净、不伤人的说法），默认 conservative；默认每 12 小时跑一次、单轮扫 300 条。黑话改为「先整理再判断」：收录前归一化去重、合并词频、剔除无意义条目，已完成的词条定期复核（`recheck_complete`/`recheck_days`），判定结合群内真实用法与上下文；默认每 4 小时跑一次。表情补描述时也会参考群聊上下文。manifest 简介精简为两句话，技术细节保留在 README。
 - `v0.1.3`（2026-10-27）：按第 5 轮复审意见补强——`[agenda] max_archive_per_run` 真正生效（每轮最多写多少条人物卡归档，超出部分顺延到下一轮，0=不限制；dry-run 不写人物卡、不受此限），`[web] base_url` 字段描述注明仅建议填写可信的 API 地址；展示名英文副名由 MaiBot Curator 调整为 Memory Keeper（中文名与插件 id 不变）。README 开头新增一句自述；配置说明按 WebUI 面板顺序重写，逐项列出每个参数的含义与取值范围，所有配置字段描述都补上默认值/范围/示例，WebUI 未填写时会直接显示提示。另：配置 Schema 生成时会自动把字段 `description` 回填为 WebUI 的 `hint`，输入框下方直接显示灰色说明（此前只有 description，WebUI 不渲染）；清理旧版遗留的死代码（3 个未调用函数、2 个未使用常量，`plugin.py` 2,974→2,877 行），新增本仓库的 `CHANGELOG.md`。

@@ -209,7 +209,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="插件总开关（true/false，默认 true；关闭后不再巡检，也不再注入上下文）")
-    config_version: str = Field(default="0.1.5", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
+    config_version: str = Field(default="0.1.6", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
 
 
 class ScheduleConfig(PluginConfigBase):
@@ -309,6 +309,7 @@ class ExpressionConfig(PluginConfigBase):
     auto_check_double_check: bool = Field(default=True, description="自动采纳前是否二次复核（true/false，默认 true；多一次 LLM 调用换更高准确率）")
     auto_check_max_per_run: int = Field(default=10, description="单次最多自动勾选多少条（默认 10；范围 0–500）")
     auto_check_log: bool = Field(default=True, description="是否记录自动勾选清单到 auto_checked.json（true/false，默认 true；便于检查与回滚）")
+    auto_check_ui_mark: bool = Field(default=True, description="自动采纳时同时把来源标记为 USER，使其出现在 WebUI「仅精选」筛选里（true/false，默认 true；真实来源始终记录在 auto_checked.json；false=只勾选 checked，不显示在仅精选）")
     context_lines: int = Field(default=6, description="判定时参考的群聊上下文条数（默认 6；范围 0–30；0=不参考上下文）")
     persona_mode: str = Field(
         default="conservative",
@@ -847,93 +848,96 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 break
         if not picked:
             return verdicts
-        blocks: Dict[str, List[str]] = {}
-        for item in picked:
-            key = _text(item.get("key"))
-            lines: List[str] = []
-            group_lines = item.get("group_lines") or []
-            if group_lines:
-                lines.append("【群内用法】")
-                lines.extend(f"  {line}" for line in group_lines[:6])
-            else:
-                lines.append("【群内用法】近段时间群聊里没找到更多上下文（以词频和历史证据为准）")
-            seed = _text(item.get("seed"))[:40]
-            if self.config.web.enabled and seed:
-                for idx, query in enumerate(self._verify_query_variants(seed)[:rounds]):
-                    try:
-                        info = await self._web_search_term(seed, query)
-                    except Exception as exc:  # noqa: BLE001
-                        lines.append(f"【联网第{idx + 1}轮】检索失败：{exc}")
-                        continue
-                    hits: List[str] = []
-                    for hit in (info.get("results") or [])[:2]:
-                        hits.append(f"{hit.get('title', '')} | {hit.get('summary') or hit.get('snippet') or ''}")
-                    page = info.get("page") or {}
-                    if page.get("content"):
-                        hits.append(f"正文摘要：{_text(page.get('content'))[:400]}")
-                    joined = "；".join(hits) if hits else "无有效资料"
-                    lines.append(f"【联网第{idx + 1}轮（{query}）】{joined}")
-            blocks[key] = lines
-        parts = [
-            f"你在给 QQ 机器人整理{label}，做「多轮多源自证」。每条候选都有 1 组【群内用法】（真实聊天记录）和若干轮【联网检索】（不同提问）。",
-            "多向的含义：既要看群里的实际用法，也要看网络资料；两边结论必须一致才算 agree=true。",
-            "群内专属表达以群内用法为准：网络查不到、但群内用法清晰稳定 → agree=true 且 group_specific=true。",
-            "如果群内证据和网络资料互相矛盾、或两边都太弱 → agree=false。",
-            schema_hint,
-            "只输出 JSON 数组，不要解释。",
-            "",
-        ]
-        for item in picked:
-            key = _text(item.get("key"))
-            parts.append(f"- 候选 key={key}｜{_text(item.get('label'))[:90]}")
-            parts.extend(f"  {line}" for line in blocks.get(key, []))
-        try:
-            text = await self._llm(
-                "\n".join(parts),
-                task_name=self.config.jargon.llm_task,
-                max_tokens=4000,
-                temperature=0.05,
-            )
-        except Exception:  # noqa: BLE001
-            return verdicts
-        parsed = _parse_json_array(text) or []
-        allowed = {_text(item.get("key")) for item in picked}
-        for entry in parsed:
-            if not isinstance(entry, dict):
+        chunk_size = max(1, min(2, budget)) if budget else 1
+        for start in range(0, len(picked), chunk_size):
+            subset = picked[start : start + chunk_size]
+            blocks: Dict[str, List[str]] = {}
+            for item in subset:
+                key = _text(item.get("key"))
+                lines: List[str] = []
+                group_lines = item.get("group_lines") or []
+                if group_lines:
+                    lines.append("【群内用法】")
+                    lines.extend(f"  {line}" for line in group_lines[:6])
+                else:
+                    lines.append("【群内用法】近段时间群聊里没找到更多上下文（以词频和历史证据为准）")
+                seed = _text(item.get("seed"))[:40]
+                if self.config.web.enabled and seed:
+                    for idx, query in enumerate(self._verify_query_variants(seed)[:rounds]):
+                        try:
+                            info = await self._web_search_term(seed, query)
+                        except Exception as exc:  # noqa: BLE001
+                            lines.append(f"【联网第{idx + 1}轮】检索失败：{exc}")
+                            continue
+                        hits: List[str] = []
+                        for hit in (info.get("results") or [])[:2]:
+                            hits.append(f"{hit.get('title', '')} | {hit.get('summary') or hit.get('snippet') or ''}")
+                        page = info.get("page") or {}
+                        if page.get("content"):
+                            hits.append(f"正文摘要：{_text(page.get('content'))[:400]}")
+                        joined = "；".join(hits) if hits else "无有效资料"
+                        lines.append(f"【联网第{idx + 1}轮（{query}）】{joined}")
+                blocks[key] = lines
+            parts = [
+                f"你在给 QQ 机器人整理{label}，做「多轮多源自证」。每条候选都有 1 组【群内用法】（真实聊天记录）和若干轮【联网检索】（不同提问）。",
+                "多向的含义：既要看群里的实际用法，也要看网络资料；两边结论必须一致才算 agree=true。",
+                "群内专属表达以群内用法为准：网络查不到、但群内用法清晰稳定 → agree=true 且 group_specific=true。",
+                "如果群内证据和网络资料互相矛盾、或两边都太弱 → agree=false。",
+                schema_hint,
+                "只输出 JSON 数组，不要解释。",
+                "",
+            ]
+            for item in subset:
+                key = _text(item.get("key"))
+                parts.append(f"- 候选 key={key}｜{_text(item.get('label'))[:90]}")
+                parts.extend(f"  {line}" for line in blocks.get(key, []))
+            try:
+                text = await self._llm(
+                    "\n".join(parts),
+                    task_name=self.config.jargon.llm_task,
+                    max_tokens=4000,
+                    temperature=0.05,
+                )
+            except Exception:  # noqa: BLE001
                 continue
-            key = _text(entry.get("key"))
-            if key not in allowed:
-                continue
-            agree = bool(entry.get("agree"))
-            confidence = round(_as_float(entry.get("confidence")), 3)
-            sources = [_text(src)[:200] for src in (entry.get("sources") or []) if _text(src)][:2]
-            record = store.get(key) or {}
-            attempts = _as_int(record.get("attempts")) + 1
-            meaning = _text(entry.get("meaning") or entry.get("description") or entry.get("style"))[:120]
-            locked = agree and confidence >= float(min_confidence) and bool(meaning)
-            if locked:
-                store[key] = {
-                    "status": "locked",
-                    "meaning": meaning,
-                    "confidence": confidence,
-                    "rounds": rounds,
-                    "sources": sources,
-                    "group_specific": bool(entry.get("group_specific")),
-                    "attempts": attempts,
-                    "ts": time.time(),
-                }
-                entry["_locked"] = True
-            else:
-                store[key] = {
-                    "status": "failed",
-                    "meaning": "",
-                    "confidence": confidence,
-                    "rounds": rounds,
-                    "sources": sources,
-                    "attempts": attempts,
-                    "ts": time.time(),
-                }
-            verdicts[key] = entry
+            parsed = _parse_json_array(text) or []
+            allowed = {_text(item.get("key")) for item in subset}
+            for entry in parsed:
+                if not isinstance(entry, dict):
+                    continue
+                key = _text(entry.get("key"))
+                if key not in allowed:
+                    continue
+                agree = bool(entry.get("agree"))
+                confidence = round(_as_float(entry.get("confidence")), 3)
+                sources = [_text(src)[:200] for src in (entry.get("sources") or []) if _text(src)][:2]
+                record = store.get(key) or {}
+                attempts = _as_int(record.get("attempts")) + 1
+                meaning = _text(entry.get("meaning") or entry.get("description") or entry.get("style"))[:120]
+                locked = agree and confidence >= float(min_confidence) and bool(meaning)
+                if locked:
+                    store[key] = {
+                        "status": "locked",
+                        "meaning": meaning,
+                        "confidence": confidence,
+                        "rounds": rounds,
+                        "sources": sources,
+                        "group_specific": bool(entry.get("group_specific")),
+                        "attempts": attempts,
+                        "ts": time.time(),
+                    }
+                    entry["_locked"] = True
+                else:
+                    store[key] = {
+                        "status": "failed",
+                        "meaning": "",
+                        "confidence": confidence,
+                        "rounds": rounds,
+                        "sources": sources,
+                        "attempts": attempts,
+                        "ts": time.time(),
+                    }
+                verdicts[key] = entry
         self._save_verified(kind)
         return verdicts
 
@@ -2212,8 +2216,12 @@ class LearningKeeperPlugin(MaiBotPlugin):
             }
             if mode == "on" and budget > 0:
                 try:
-                    await self._db(EXPRESSION_MODEL, "update", filters={"id": row.get("id")}, data={"checked": True})
+                    adopt_data: Dict[str, Any] = {"checked": True}
+                    if cfg.auto_check_ui_mark:
+                        adopt_data["modified_by"] = "USER"
+                    await self._db(EXPRESSION_MODEL, "update", filters={"id": row.get("id")}, data=adopt_data)
                     entry["adopted"] = True
+                    entry["ui_mark"] = bool(cfg.auto_check_ui_mark)
                     result["auto_checked"] = _as_int(result.get("auto_checked")) + 1
                     budget -= 1
                 except Exception as exc:  # noqa: BLE001
