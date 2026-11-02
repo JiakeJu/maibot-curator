@@ -9,7 +9,7 @@
    带最多 10 条释义帮 bot 理解聊天。
 2. 表达方式（expressions）：宿主会自动学习"表达方式"（AI 生成、默认不勾选）。本模块定期做
    embedding 聚类去重、改写情景描述、删除无意义碎片（纯符号、断句残片等）。
-   只有 checked=1 的表达会真正注入 replyer，默认不自动勾选（见 config 的 auto_check）。
+   只有 checked=1 的表达会真正注入 replyer，自动采纳由 `[expression] auto_check_mode` 控制（默认 report）。
 3. 表情包（images, EMOJI）：给已注册表情补「画面描述｜标签｜适用场景」，并按描述相似度
    合并近似重复（保留更常用的那张、取消注册其余）。不改宿主随机选图的逻辑。
 
@@ -74,7 +74,7 @@ import time
 from datetime import datetime
 from uuid import uuid4
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from maibot_sdk import API, Field, HookHandler, MaiBotPlugin, PluginConfigBase
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
@@ -96,9 +96,42 @@ MAX_EVIDENCE_IDS = 12
 MAX_SURROUNDING = 8
 WEB_FETCH_MAX_CHARS = 1500
 
-_COMMON_WORDS_EXCLUDED = (
-    "抽象 交学费 命硬 摸鱼 神了 干饭 水群 绷不住了 我去 好叭 好吧 哈哈 确实 真的 不是 没有 "
-    "这个 那个 什么 怎么 可以 不行 就是 还是 但是 所以 因为 如果 然后 现在 今天 明天 昨天"
+_COMMON_WORDS_EXCLUDED = frozenset(
+    " ".join([
+        "抽象",
+        "交学费",
+        "命硬",
+        "摸鱼",
+        "神了",
+        "干饭",
+        "水群",
+        "绷不住了",
+        "我去",
+        "好叭",
+        "好吧",
+        "哈哈",
+        "确实",
+        "真的",
+        "不是",
+        "没有",
+        "这个",
+        "那个",
+        "什么",
+        "怎么",
+        "可以",
+        "不行",
+        "就是",
+        "还是",
+        "但是",
+        "所以",
+        "因为",
+        "如果",
+        "然后",
+        "现在",
+        "今天",
+        "明天",
+        "昨天",
+    ]).split()
 )
 
 _AUTO_ADOPT_BLOCK_WORDS = (
@@ -125,11 +158,73 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """宽松布尔解析：只认明确真/假，其余回退默认值（避免 bool("false") 为真）。"""
+    if isinstance(value, bool):
+        return value
+    text = _text(value).strip().lower()
+    if text in ("true", "1", "yes", "y", "是", "对"):
+        return True
+    if text in ("false", "0", "no", "n", "否", "不是"):
+        return False
+    return default
+
+
 def _as_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_ts_seconds(value: Any) -> float:
+    """把宿主的时间字段（epoch 数字或 'YYYY-MM-DD HH:MM:SS.ffffff' 字符串）统一成秒级时间戳。"""
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    text_value = _text(value)
+    if not text_value:
+        return 0.0
+    try:
+        return float(text_value)
+    except ValueError:
+        pass
+    cleaned = text_value.replace("T", " ").replace("Z", "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(cleaned, fmt).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
+def _count_message_evidence(value: Any) -> int:
+    """统计 evidence_messages 里的聊天消息条数（宿主存成嵌套 JSON 字符串，按 message_id 计数）。"""
+    items = value
+    if isinstance(value, str):
+        try:
+            items = json.loads(value)
+        except Exception:  # noqa: BLE001
+            return 0
+    count = 0
+    stack = [items]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, list):
+            stack.extend(current)
+        elif isinstance(current, dict):
+            if "message_id" in current:
+                count += 1
+            else:
+                stack.extend(v for v in current.values() if isinstance(v, (list, dict)))
+        elif isinstance(current, str) and current.strip():
+            # 兼容旧格式：evidence_messages 里直接存 message_id 字符串
+            count += 1
+    return count
 
 
 def _parse_json_array(raw: str) -> Optional[list]:
@@ -209,7 +304,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="插件总开关（true/false，默认 true；关闭后不再巡检，也不再注入上下文）")
-    config_version: str = Field(default="0.1.6", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
+    config_version: str = Field(default="0.1.7", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
 
 
 class ScheduleConfig(PluginConfigBase):
@@ -244,12 +339,21 @@ class JargonConfig(PluginConfigBase):
     min_confidence: float = Field(default=0.6, description="低于该置信度的判定不写回（默认 0.6；范围 0–1；例：0.6=置信度 60% 以上才写）")
     delete_rejected: bool = Field(default=True, description="把判定为常见词/无意义的候选从黑话库删除（true/false，默认 true）")
     clear_high_frequency_terms: bool = Field(default=False, description="写回成功时清空高频词表（整表清空、不可恢复；只影响黑话匹配打分，一般保持关闭；true/false，默认 false）")
-    max_writes_per_run: int = Field(default=40, description="单次最多写回多少条黑话（默认 40；范围 0–1000；0=不写回）")
+    max_writes_per_run: int = Field(default=120, description="单次最多写回多少条黑话（默认 120；范围 0–1000；0=不写回）")
     group_usage_hours: int = Field(default=336, description="自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760）")
     dedupe_similar: bool = Field(default=True, description="收录前是否先整理：同一词的不同写法归一化去重、合并词频（true/false，默认 true）")
     recheck_complete: bool = Field(default=True, description="是否定期复核已完成的词条（看是否仍在使用、含义是否准确；true/false，默认 true）")
     recheck_days: int = Field(default=30, description="已完成词条多少天未复核才重新判定（默认 30；范围 1–365）")
     context_lines: int = Field(default=6, description="判定时参考的群聊上下文条数（默认 6；范围 0–30；0=只使用该词自身证据）")
+    new_word_enabled: bool = Field(default=True, description="是否开辟「新词通道」：对刚出现、词频还没到 min_count 的新词单独判定（true/false，默认 true）")
+    new_word_days: int = Field(default=14, description="新词通道只处理创建多少天内的词（默认 14；范围 1–90；太久的历史新词不再补）")
+    new_word_min_age_hours: int = Field(default=24, description="新词至少出现多少小时后才判定，避免一时玩梗被误收录（小时，默认 24；范围 0–240）")
+    new_word_min_evidence: int = Field(default=2, description="新词至少要有几条聊天证据才判定（默认 2；范围 1–20；证据不足跳过）")
+    new_word_min_confidence: float = Field(default=0.8, description="新词判定需要的更高置信度门槛（默认 0.8；范围 0–1；比普通候选更严）")
+    new_word_max_per_run: int = Field(default=60, description="每轮最多处理多少个新词（默认 60；范围 0–300；0=关闭新词通道；不占用 max_candidates 名额）")
+    new_word_batch_threshold: int = Field(default=10, description="新词累计到多少条后才统一批量识别（默认 10；范围 1–300；未达阈值先积攒，减少零散调用）")
+    new_word_batch_size: int = Field(default=6, description="新词批量识别时每次交给 LLM 的条数（默认 6；范围 1–50；与普通候选批次分开，避免大批量输出截断）")
+    new_word_mark_unconfirmed: bool = Field(default=True, description="网络/群内证据不足以自证时，是否仍收录并在含义前标注「（群内说法，待确认）」（true/false，默认 true）")
 
 
 class WebSearchConfig(PluginConfigBase):
@@ -295,7 +399,6 @@ class ExpressionConfig(PluginConfigBase):
     delete_meaningless: bool = Field(default=True, description="是否删除判定为无意义的表达（true/false，默认 true）")
     min_confidence: float = Field(default=0.65, description="低于该置信度的判定不写回（默认 0.65；范围 0–1）")
     max_writes_per_run: int = Field(default=200, description="单次最多写回多少条表达（默认 200；范围 0–2000）")
-    auto_check: bool = Field(default=False, description="旧版自动勾选开关（true/false，默认 false；已由 auto_check_mode 取代，仅为兼容保留）")
     verification_rounds: int = Field(default=2, description="多轮自证轮数（默认 2；范围 1–5；群内用法 + 联网检索）")
     verify_terms_per_run: int = Field(default=8, description="单次最多对多少条表达做多轮自证（默认 8；范围 0–50）")
     group_usage_hours: int = Field(default=336, description="自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760）")
@@ -304,14 +407,14 @@ class ExpressionConfig(PluginConfigBase):
     persona_max_rows: int = Field(default=80, description="单次最多严判多少条表达（默认 80；范围 1–300；只判第一轮认定有意义的条目）")
     persona_max_chars: int = Field(default=1200, description="读入宿主人格设定的字数上限（默认 1200；范围 200–4000；太小判断不准，太大费 token）")
     persona_traits: str = Field(default="友善、温和，偶尔毒舌和俏皮；不刻薄、不贬低他人、不油腻", description="目标角色性格关键词（默认「友善、温和，偶尔毒舌和俏皮；不刻薄、不贬低他人、不油腻」；用顿号或分号分隔）")
-    auto_check_mode: str = Field(default="report", description="自动采纳模式（off=不自动；report=只生成候选清单不勾选；on=合格即自动勾选；默认 report，建议先跑一轮 report 观察）")
+    auto_check_mode: Literal["off", "report", "on"] = Field(default="report", description="自动采纳模式（下拉选择：off=不自动；report=只生成候选清单不勾选；on=合格即自动勾选；默认 report，建议先跑一轮 report 观察）")
     auto_check_min_confidence: float = Field(default=0.9, description="自动采纳所需的判定置信度（默认 0.9；范围 0–1）")
     auto_check_double_check: bool = Field(default=True, description="自动采纳前是否二次复核（true/false，默认 true；多一次 LLM 调用换更高准确率）")
     auto_check_max_per_run: int = Field(default=10, description="单次最多自动勾选多少条（默认 10；范围 0–500）")
     auto_check_log: bool = Field(default=True, description="是否记录自动勾选清单到 auto_checked.json（true/false，默认 true；便于检查与回滚）")
     auto_check_ui_mark: bool = Field(default=True, description="自动采纳时同时把来源标记为 USER，使其出现在 WebUI「仅精选」筛选里（true/false，默认 true；真实来源始终记录在 auto_checked.json；false=只勾选 checked，不显示在仅精选）")
     context_lines: int = Field(default=6, description="判定时参考的群聊上下文条数（默认 6；范围 0–30；0=不参考上下文）")
-    persona_mode: str = Field(
+    persona_mode: Literal["conservative", "adapt"] = Field(
         default="conservative",
         description=(
             "人格判定取向：conservative=保守学习，优先角色一致性，群内流行但与角色口吻冲突的表达也删；"
@@ -456,6 +559,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
         self._emoji_verified: Dict[str, Any] = {}
         self._agenda: Dict[str, Any] = {}
         self._persona_cache: Optional[str] = None
+        self._msg_cache: Dict[str, Dict[str, Any]] = {}
+        self._ctx_cache: Dict[str, List[str]] = {}
 
     # ===== 生命周期 =====
 
@@ -497,6 +602,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
             self._task = None
             if task is not None and not task.done():
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             return
         # 重新启用（或改调度）时确保后台循环在跑：任务被 cancel 后只有 on_load 会重新拉起，这里补上
         self._start_loop()
@@ -517,16 +626,30 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 await asyncio.sleep(delay)
             if self.config.schedule.run_on_load:
                 await self._safe_run_due()
-            while not self._stopping:
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 后台任务必须自愈
+            self.ctx.logger.error("[maibot-curator] 调度循环启动异常: %s", exc, exc_info=True)
+        backoff = 0
+        while not self._stopping:
+            try:
                 tick = max(5, int(self.config.schedule.tick_minutes))
                 await asyncio.sleep(tick * 60)
                 if self._stopping:
                     break
                 await self._safe_run_due()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - 后台任务必须自愈
-            self.ctx.logger.error("[maibot-curator] 调度循环异常: %s", exc, exc_info=True)
+                backoff = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 单轮异常不能让循环停摆
+                backoff = min(backoff + 1, 6)
+                self.ctx.logger.error(
+                    "[maibot-curator] 调度循环异常（%ss 后重试）: %s", 60 * backoff, exc, exc_info=True
+                )
+                try:
+                    await asyncio.sleep(60 * backoff)
+                except asyncio.CancelledError:
+                    raise
 
     async def _safe_run_due(self) -> None:
         """跑一轮到期的模块；单轮异常只记录、绝不终止循环（下一轮照常）。"""
@@ -661,14 +784,16 @@ class LearningKeeperPlugin(MaiBotPlugin):
         try:
             if path.exists():
                 return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self.ctx.logger.warning("[maibot-curator] 读取文件失败 %s: %s", path.name, exc)
         return default
 
     def _write_json(self, path: Path, payload: Any) -> None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            tmp.replace(path)
         except Exception as exc:  # noqa: BLE001
             self.ctx.logger.warning("[maibot-curator] 写入文件失败 %s: %s", path.name, exc)
 
@@ -710,8 +835,20 @@ class LearningKeeperPlugin(MaiBotPlugin):
             raw = await self.ctx.call_capability("llm.embed", timeout_ms=120000, texts=chunk, task_name="embedding")
             if not isinstance(raw, dict) or not raw.get("success"):
                 raise RuntimeError(f"embedding 调用失败: {raw!r}")
-            for item in raw.get("results") or []:
-                vectors.append([float(x) for x in (item.get("embedding") or [])])
+            results = raw.get("results")
+            if not isinstance(results, list) or len(results) != len(chunk):
+                got = len(results) if isinstance(results, list) else repr(results)
+                raise RuntimeError(f"embedding 返回数量与请求不一致({got}/{len(chunk)})")
+            dim = None
+            for item in results:
+                emb = item.get("embedding") if isinstance(item, dict) else None
+                if not isinstance(emb, list) or not emb:
+                    raise RuntimeError("embedding 返回空向量")
+                if dim is None:
+                    dim = len(emb)
+                elif len(emb) != dim:
+                    raise RuntimeError(f"embedding 维数不一致({len(emb)}/{dim})")
+                vectors.append([float(x) for x in emb])
         return vectors
 
     # ===== 多轮多源自证（群内用法 + 联网检索） =====
@@ -827,8 +964,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
         min_confidence: float,
         label: str,
         schema_hint: str,
+        persist: bool = True,
     ) -> Dict[str, Any]:
-        """统一自证：每条候选带【群内用法】+ 2~3 轮【联网检索】，一致才锁定。"""
+        """统一自证：每条候选带【群内用法】+ 2~3 轮【联网检索】，一致才锁定（dry-run 不落锁定台账）。"""
         store = self._verified_store(kind)
         rounds = max(2, min(3, int(rounds)))
         budget = max(0, int(budget))
@@ -899,16 +1037,29 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     temperature=0.05,
                 )
             except Exception:  # noqa: BLE001
+                for item in subset:
+                    key = _text(item.get("key"))
+                    record = store.get(key) or {}
+                    store.setdefault(key, {}).update(
+                        {
+                            "status": record.get("status") or "failed",
+                            "attempts": _as_int(record.get("attempts")) + 1,
+                            "rounds": rounds,
+                            "ts": time.time(),
+                        }
+                    )
                 continue
             parsed = _parse_json_array(text) or []
             allowed = {_text(item.get("key")) for item in subset}
+            seen: set = set()
             for entry in parsed:
                 if not isinstance(entry, dict):
                     continue
                 key = _text(entry.get("key"))
                 if key not in allowed:
                     continue
-                agree = bool(entry.get("agree"))
+                seen.add(key)
+                agree = _as_bool(entry.get("agree"))
                 confidence = round(_as_float(entry.get("confidence")), 3)
                 sources = [_text(src)[:200] for src in (entry.get("sources") or []) if _text(src)][:2]
                 record = store.get(key) or {}
@@ -922,7 +1073,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                         "confidence": confidence,
                         "rounds": rounds,
                         "sources": sources,
-                        "group_specific": bool(entry.get("group_specific")),
+                        "group_specific": _as_bool(entry.get("group_specific")),
                         "attempts": attempts,
                         "ts": time.time(),
                     }
@@ -938,12 +1089,25 @@ class LearningKeeperPlugin(MaiBotPlugin):
                         "ts": time.time(),
                     }
                 verdicts[key] = entry
-        self._save_verified(kind)
+            for key in allowed - seen:
+                record = store.get(key) or {}
+                store.setdefault(key, {}).update(
+                    {
+                        "status": record.get("status") or "failed",
+                        "attempts": _as_int(record.get("attempts")) + 1,
+                        "rounds": rounds,
+                        "ts": time.time(),
+                    }
+                )
+        if persist:
+            self._save_verified(kind)
         return verdicts
 
     # ===== 黑话模块 =====
 
     async def _run_jargon(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        self._msg_cache = {}
+        self._ctx_cache = {}
         # 流程：读黑话库 → 筛候选（出现够多且缺含义/未完成）→ 分批 LLM 判定 →
         #      低置信/新词走多轮自证（群内用法+联网）→ 写回（更新含义/删除/标记完成）→ 汇总
         cfg = self.config.jargon
@@ -958,6 +1122,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "applied": {"updated": 0, "deleted": 0, "settled": 0, "hf_cleared": False},
             "summary": "",
             "errors": [],
+            "new_word_candidates": 0,
+            "new_word_accepted": 0,
+            "new_word_skipped": 0,
         }
         rows = await self._db(JARGON_MODEL, "get", order_by="-count", limit=3000)
         if not isinstance(rows, list):
@@ -965,7 +1132,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
             return result
         rows = await self._jargon_organize(rows, result)
         min_count = max(1, int(cfg.min_count))
+        now_ts = time.time()
         candidates: List[Dict[str, Any]] = []
+        new_words: List[Dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -976,11 +1145,17 @@ class LearningKeeperPlugin(MaiBotPlugin):
             meaning = _text(row.get("meaning"))
             complete = bool(row.get("is_complete"))
             if count < min_count:
+                if self._is_new_word_candidate(row, now_ts):
+                    marked = dict(row)
+                    marked["_new_word"] = True
+                    new_words.append(marked)
                 continue
             if meaning and complete:
                 if not cfg.recheck_complete:
                     continue
-                last_ts = _as_float(row.get("last_seen_timestamp") or row.get("updated_timestamp") or row.get("created_timestamp"))
+                last_ts = _parse_ts_seconds(
+                    row.get("last_seen_timestamp") or row.get("updated_timestamp") or row.get("created_timestamp")
+                )
                 if last_ts > 0 and (time.time() - last_ts) < max(1, int(cfg.recheck_days)) * 86400:
                     continue
                 row = dict(row)
@@ -988,8 +1163,19 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 result["rechecked"] = _as_int(result.get("rechecked")) + 1
             candidates.append(row)
         candidates = candidates[: max(1, int(cfg.max_candidates))]
-        result["candidates"] = len(candidates)
-        if not candidates:
+        new_word_total = len(new_words)
+        threshold = max(1, int(cfg.new_word_batch_threshold))
+        if new_word_total >= threshold:
+            new_words = new_words[: max(0, int(cfg.new_word_max_per_run))]
+            result["new_word_waiting"] = 0
+        else:
+            # 未达累计阈值：本轮先积攒，不零散消耗 LLM 调用
+            result["new_word_waiting"] = new_word_total
+            new_words = []
+        pending: List[Dict[str, Any]] = candidates + new_words
+        result["new_word_candidates"] = len(new_words)
+        result["candidates"] = len(pending)
+        if not pending:
             result["summary"] = "没有需要处理的黑话候选"
             return result
 
@@ -998,13 +1184,22 @@ class LearningKeeperPlugin(MaiBotPlugin):
         for start in range(0, len(candidates), batch_size):
             batch = candidates[start : start + batch_size]
             decisions.extend(await self._jargon_judge_batch(batch, result))
+        new_word_batch = max(1, int(cfg.new_word_batch_size))
+        for start in range(0, len(new_words), new_word_batch):
+            batch = new_words[start : start + new_word_batch]
+            decisions.extend(await self._jargon_judge_batch(batch, result))
 
         # 联网复核：新收录词 / 低置信 / 模型自己要求联网的词 → 多轮多源自证（群内用法 + 联网检索），一致才固定
         result["verified_locked"] = 0
         result["verified_rounds"] = 0
         if self.config.web.enabled:
             web_budget = max(0, int(self.config.web.max_searches_per_run))
-            verify_cap = max(1, int(self.config.web.verify_terms_per_run))
+            verify_terms = max(0, int(self.config.web.verify_terms_per_run))
+            if verify_terms <= 0:
+                verify_cap = 0
+            else:
+                rounds = max(1, int(self.config.web.verification_rounds))
+                verify_cap = min(verify_terms, max(1, web_budget // rounds))
             web_needed: List[Dict[str, Any]] = []
             for decision in decisions:
                 if len(web_needed) >= min(web_budget, verify_cap):
@@ -1016,9 +1211,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     continue
                 # 新词（判定为值得收录的）也走多轮自证：群内用法 + 联网检索一致才固定
                 need = (
-                    bool(decision.get("needs_web"))
+                    _as_bool(decision.get("needs_web"))
                     or _as_float(decision.get("confidence")) < 0.75
-                    or bool(decision.get("keep"))
+                    or _as_bool(decision.get("keep"))
                 )
                 if need:
                     web_needed.append(decision)
@@ -1031,18 +1226,82 @@ class LearningKeeperPlugin(MaiBotPlugin):
             record = self._jargon_verified.get(decision["content"]) or {}
             if _as_int(record.get("attempts")) >= max_attempts and record.get("status") != "locked":
                 decision["give_up"] = True
+        decisions = self._filter_new_word_decisions(pending, decisions, result)
         result["decisions"] = decisions
         if dry_run:
             result["summary"] = f"候选 {len(candidates)} 个，判定 {len(decisions)} 条（只报告）"
             return result
-        await self._jargon_apply(candidates, decisions, result)
+        await self._jargon_apply(pending, decisions, result)
+        extra = ""
+        if int(cfg.new_word_max_per_run) > 0:
+            waiting = _as_int(result.get("new_word_waiting"))
+            if waiting:
+                extra = f"；新词累计 {waiting} 个（未达批量阈值 {int(cfg.new_word_batch_threshold)}，先积攒）"
+            else:
+                extra = (
+                    f"；新词 {_as_int(result.get('new_word_candidates'))} 个，"
+                    f"收录 {_as_int(result.get('new_word_accepted'))} 个"
+                )
         result["summary"] = (
-            f"候选 {len(candidates)} 个，更新 {result['applied']['updated']}，"
+            f"候选 {len(pending)} 个，更新 {result['applied']['updated']}，"
             f"删除 {result['applied']['deleted']}，标记完成 {result['applied'].get('settled', 0)}，自证固定 {result.get('verified_locked', 0)} 个"
-            f"（{result.get('verified_rounds', 0)} 轮检索）"
+            f"（{result.get('verified_rounds', 0)} 轮检索）" + extra
         )
         return result
 
+
+    def _is_new_word_candidate(self, row: Dict[str, Any], now_ts: float) -> bool:
+        """新词通道：词频未达 min_count、但出现够久且有聊天证据的新词，单独放行。"""
+        cfg = self.config.jargon
+        if not bool(cfg.new_word_enabled) or int(cfg.new_word_max_per_run) <= 0:
+            return False
+        if bool(row.get("is_complete")) or _text(row.get("meaning")):
+            return False
+        created = _parse_ts_seconds(row.get("created_timestamp"))
+        if created <= 0:
+            return False
+        age = now_ts - created
+        if age < max(0, int(cfg.new_word_min_age_hours)) * 3600:
+            return False
+        if age > max(1, int(cfg.new_word_days)) * 86400:
+            return False
+        return _count_message_evidence(row.get("evidence_messages")) >= max(1, int(cfg.new_word_min_evidence))
+
+    def _filter_new_word_decisions(
+        self,
+        pending: List[Dict[str, Any]],
+        decisions: List[Dict[str, Any]],
+        result: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """新词判定收紧：更高置信度门槛；证据不足时可标注「群内说法，待确认」；不通过则不写回、不删除。"""
+        cfg = self.config.jargon
+        new_contents = {_text(row.get("content")) for row in pending if row.get("_new_word")}
+        if not new_contents:
+            return decisions
+        min_conf = max(0.0, min(1.0, float(cfg.new_word_min_confidence)))
+        kept: List[Dict[str, Any]] = []
+        for decision in decisions:
+            content = _text(decision.get("content"))
+            if content not in new_contents:
+                kept.append(decision)
+                continue
+            confidence = _as_float(decision.get("confidence"))
+            meaning = _text(decision.get("meaning"))[:60]
+            if not (_as_bool(decision.get("keep")) and meaning and confidence >= min_conf):
+                result["new_word_skipped"] = _as_int(result.get("new_word_skipped")) + 1
+                continue
+            record = self._jargon_verified.get(content) or {}
+            if (
+                bool(cfg.new_word_mark_unconfirmed)
+                and record.get("status") != "locked"
+                and not meaning.startswith("（群内说法")
+            ):
+                meaning = ("（群内说法，待确认）" + meaning)[:60]
+            decision["meaning"] = meaning
+            decision["_new_word"] = True
+            result["new_word_accepted"] = _as_int(result.get("new_word_accepted")) + 1
+            kept.append(decision)
+        return kept
 
     async def _jargon_organize(self, rows: List[Dict[str, Any]], result: Dict[str, Any]) -> List[Dict[str, Any]]:
         """收录前整理：同一词的不同写法归一化去重、合并词频，并剔除无意义条目。"""
@@ -1076,14 +1335,13 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 meaningful.extend(items)
                 continue
             keeper = max(items, key=lambda row: (_as_int(row.get("count")), -_as_int(row.get("id"))))
-            total = sum(_as_int(row.get("count")) for row in items)
-            if not dry_run and budget > 0:
-                try:
-                    await self._db(JARGON_MODEL, "update", filters={"id": keeper.get("id")}, data={"count": total})
-                    budget -= 1
-                except Exception as exc:  # noqa: BLE001
-                    result["errors"].append(f"黑话合并计数失败 {keeper.get('id')}: {exc}")
-            keeper["count"] = total
+            keeper_meaning = _text(keeper.get("meaning"))
+            if not keeper_meaning:
+                for row in items:
+                    if row is not keeper and _text(row.get("meaning")):
+                        keeper_meaning = _text(row.get("meaning"))[:60]
+                        break
+            removed_rows: List[Dict[str, Any]] = []
             for row in items:
                 if row is keeper:
                     continue
@@ -1093,8 +1351,22 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 try:
                     await self._db(JARGON_MODEL, "delete", filters={"id": row.get("id")})
                     budget -= 1
+                    removed_rows.append(row)
                 except Exception as exc:  # noqa: BLE001
                     result["errors"].append(f"黑话去重删除失败 {row.get('id')}: {exc}")
+            total = _as_int(keeper.get("count")) + sum(_as_int(row.get("count")) for row in removed_rows)
+            if not dry_run and budget > 0 and total != _as_int(keeper.get("count")) + 0:
+                data: Dict[str, Any] = {"count": total}
+                if keeper_meaning and not _text(keeper.get("meaning")):
+                    data["meaning"] = keeper_meaning
+                try:
+                    await self._db(JARGON_MODEL, "update", filters={"id": keeper.get("id")}, data=data)
+                    budget -= 1
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(f"黑话合并计数失败 {keeper.get('id')}: {exc}")
+            keeper["count"] = total
+            if keeper_meaning and not _text(keeper.get("meaning")):
+                keeper["meaning"] = keeper_meaning
             meaningful.append(keeper)
         if dropped and cfg.delete_rejected and not dry_run:
             for row in dropped:
@@ -1154,14 +1426,18 @@ class LearningKeeperPlugin(MaiBotPlugin):
         for mid in message_ids:
             if len(lines) >= limit:
                 break
-            try:
-                rows = await self._db(MESSAGE_MODEL, "get", filters={"message_id": mid}, limit=1)
-            except Exception as exc:  # noqa: BLE001
-                result["errors"].append(f"读取证据失败 {mid}: {exc}")
+            cached = self._msg_cache.get(mid)
+            if cached is None:
+                try:
+                    rows = await self._db(MESSAGE_MODEL, "get", filters={"message_id": mid}, limit=1)
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(f"读取证据失败 {mid}: {exc}")
+                    continue
+                cached = rows[0] if isinstance(rows, list) and rows else {}
+                self._msg_cache[mid] = cached
+            row = cached
+            if not isinstance(row, dict) or not row:
                 continue
-            if not isinstance(rows, list) or not rows:
-                continue
-            row = rows[0]
             text = _text(row.get("processed_plain_text"))
             if not text:
                 continue
@@ -1234,7 +1510,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "请逐条判断：",
             "1) keep：这个词是否值得收录进黑话库，用来帮助机器人听懂群友在说什么。",
             "   值得收录：拼音缩写（zdjd=真的假的、yyds）、英文缩写或空耳（ds、be like、onp）、谐音换字（史=屎、铸=猪、窝=我）、群内反复出现且指代固定的内部梗。",
-            f"   不要收录：常见词或正常表达（{_COMMON_WORDS_EXCLUDED}）、普通名词、人名昵称群名、纯数字或标点、常见英文与技术名词（bot token AI MC cos UP主 APP API）。",
+            f"   不要收录：常见词或正常表达（{"、".join(sorted(_COMMON_WORDS_EXCLUDED))}）、普通名词、人名昵称群名、纯数字或标点、常见英文与技术名词（bot token AI MC cos UP主 APP API）。",
             "2) meaning：若 keep 为 true，用不超过 20 个汉字说明它在群里的意思；不要复述词本身，不要编造。证据不足或不确定，就把 keep 设为 false。",
             "3) confidence：0 到 1 的置信度。",
             "4) needs_web：如果你觉得这是网络流行语/缩写，但仅凭群聊证据无法确定含义，设为 true（最多 6 个词）。",
@@ -1278,15 +1554,15 @@ class LearningKeeperPlugin(MaiBotPlugin):
             content = _text(entry.get("content"))
             if not content or content not in known:
                 continue
-            keep = bool(entry.get("keep"))
+            keep = _as_bool(entry.get("keep"))
             decisions.append(
                 {
                     "content": content,
                     "keep": keep,
-                    "is_jargon": bool(entry.get("is_jargon", keep)),
+                    "is_jargon": _as_bool(entry.get("is_jargon", keep)),
                     "meaning": _text(entry.get("meaning"))[:60],
                     "confidence": round(_as_float(entry.get("confidence")), 3),
-                    "needs_web": bool(entry.get("needs_web")),
+                    "needs_web": _as_bool(entry.get("needs_web")),
                 }
             )
         return decisions
@@ -1394,7 +1670,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 "confidence": 0.0,
                 "needs_web": False,
             }
-            agree = bool(entry.get("rounds_agree"))
+            agree = _as_bool(entry.get("rounds_agree"))
             meaning = _text(entry.get("meaning"))[:60]
             confidence = round(_as_float(entry.get("confidence")), 3)
             sources = [_text(src)[:200] for src in (entry.get("sources") or []) if _text(src)][:2]
@@ -1460,13 +1736,17 @@ class LearningKeeperPlugin(MaiBotPlugin):
     ) -> None:
         cfg = self.config.jargon
         min_conf = float(cfg.min_confidence)
-        max_writes = max(1, int(cfg.max_writes_per_run))
+        max_writes = max(0, int(cfg.max_writes_per_run))
         by_content = {_text(item.get("content")): item for item in candidates}
         updated = 0
         deleted = 0
         settled = 0
-        for decision in decisions:
-            if updated + deleted >= max_writes:
+        # 新词通道优先写回：避免主候选先把 max_writes_per_run 用满，导致本轮收录的新词落不了库
+        ordered = [item for item in decisions if item.get("_new_word")] + [
+            item for item in decisions if not item.get("_new_word")
+        ]
+        for decision in ordered:
+            if updated + deleted + settled >= max_writes:
                 break
             candidate = by_content.get(decision["content"])
             if not candidate or candidate.get("id") is None:
@@ -1522,7 +1802,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
         result["applied"]["updated"] = updated
         result["applied"]["deleted"] = deleted
         result["applied"]["settled"] = settled
-        if cfg.clear_high_frequency_terms and (updated or deleted):
+        if cfg.clear_high_frequency_terms and (updated or deleted or settled):
             try:
                 await self._db(HF_TERM_MODEL, "delete", filters={})
                 result["applied"]["hf_cleared"] = True
@@ -1680,10 +1960,13 @@ class LearningKeeperPlugin(MaiBotPlugin):
     # ===== 表达方式模块 =====
 
     async def _run_expression(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        self._msg_cache = {}
+        self._ctx_cache = {}
         # 流程：读库 → 只取 AI 学习且未勾选的条目 → embedding 聚类相似合并 →
         #      分批 LLM 判质量/改情景/删无意义 → 写回 → 对低置信条目做自证 → 汇总
         cfg = self.config.expression
         dry_run = not cfg.writeback
+        max_writes = max(0, int(cfg.max_writes_per_run))
         result: Dict[str, Any] = {
             "dry_run": dry_run,
             "scanned": 0,
@@ -1749,7 +2032,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     continue
                 keeper = max(
                     items,
-                    key=lambda r: (_as_int(r.get("count")), len(_text(r.get("style"))), -_as_int(r.get("id"))),
+                    key=lambda r: (_as_int(r.get("count")), -_as_int(r.get("id"))),
                 )
                 survivors.append(keeper)
                 for row in items:
@@ -1762,7 +2045,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             if merged_away and cfg.writeback:
                 written = 0
                 for row_id in merged_away:
-                    if written >= int(cfg.max_writes_per_run):
+                    if written >= max_writes:
                         break
                     try:
                         await self._db(EXPRESSION_MODEL, "delete", filters={"id": row_id})
@@ -1790,7 +2073,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 judged_rows.append({"row": row, "decision": decision})
                 if not cfg.writeback:
                     continue
-                if writes >= int(cfg.max_writes_per_run):
+                if writes >= max_writes:
                     continue
                 row_id = row.get("id")
                 confidence = _as_float(decision.get("confidence"))
@@ -1810,9 +2093,6 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     data["situation"] = new_situation
                 if new_style and new_style != _text(row.get("style")):
                     data["style"] = new_style
-                if cfg.auto_check and confidence >= 0.85 and _as_int(row.get("count")) >= 2:
-                    data["checked"] = True
-                    result["checked"] += 1
                 if not data:
                     continue
                 try:
@@ -1823,7 +2103,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     result["errors"].append(f"改写表达失败 {row_id}: {exc}")
         # 2.5) 人格适配严判：对会被采用的表达再判一轮，删掉攻击性强、适用面窄、不符合角色的
         persona_deleted_ids, writes, persona_verdicts = await self._expression_persona_purge(
-            judged_rows, result, max(0, int(cfg.max_writes_per_run) - writes)
+            judged_rows, result, max(0, max_writes - writes)
         )
         await self._expression_auto_adopt(judged_rows, persona_verdicts, result)
         result.pop("_persona_verdicts", None)
@@ -1874,6 +2154,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     min_confidence=float(vcfg.min_confidence),
                     label="表达方式库",
                     schema_hint='每个条目输出：{"key":"expr:ID","agree":true/false,"keep":true/false,"situation":"6~14字情景","style":"30字以内可直接照着说的短句","group_specific":true/false,"confidence":0-1,"sources":["url"]}',
+                    persist=not dry_run,
                 )
                 result["verified_locked"] = sum(1 for entry in verdicts.values() if entry.get("_locked"))
                 result["group_specific"] = sum(
@@ -1893,9 +2174,12 @@ class LearningKeeperPlugin(MaiBotPlugin):
                             data["style"] = new_style
                         if not data:
                             continue
+                        if writes >= max_writes:
+                            break
                         try:
                             await self._db(EXPRESSION_MODEL, "update", filters={"id": row_id}, data=data)
                             result["rewritten"] += 1
+                            writes += 1
                         except Exception as exc:  # noqa: BLE001
                             result["errors"].append(f"表达自证写回失败 {row_id}: {exc}")
         result["summary"] = (
@@ -1971,7 +2255,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             decisions.append(
                 {
                     "id": row_id,
-                    "useful": bool(entry.get("useful")),
+                    "useful": _as_bool(entry.get("useful")),
                     "situation": _text(entry.get("situation")),
                     "style": _text(entry.get("style")),
                     "confidence": round(_as_float(entry.get("confidence")), 3),
@@ -1984,6 +2268,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
         """读取最近群聊，作为判定表达使用场景的上下文。"""
         if not session_id or limit <= 0:
             return []
+        cache_key = f"{session_id}:{int(limit)}"
+        cached_lines = self._ctx_cache.get(cache_key)
+        if cached_lines is not None:
+            return list(cached_lines)
         try:
             now = time.time()
             raw = await self.ctx.call_capability(
@@ -2011,7 +2299,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 continue
             speaker = _text(flat.get("user_cardname") or flat.get("user_nickname") or "群友")[:12]
             lines.append(f"{speaker}：{body}")
-        return lines[-int(limit):]
+        lines = lines[-int(limit):]
+        self._ctx_cache[cache_key] = lines
+        return list(lines)
 
     def _expression_auto_gate(self, style: str) -> str:
         """自动采纳前的确定性过滤：返回不通过原因，空串=通过。"""
@@ -2139,7 +2429,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             entries.append(
                 {
                     "id": row_id,
-                    "suitable": bool(entry.get("suitable")),
+                    "suitable": _as_bool(entry.get("suitable")),
                     "reason": _text(entry.get("reason"))[:20],
                     "risk": _text(entry.get("risk")).lower() or "none",
                 }
@@ -2154,14 +2444,12 @@ class LearningKeeperPlugin(MaiBotPlugin):
     ) -> None:
         """自动精选：人格严判通过 + 确定性过滤 + 二次复核 → 候选清单/自动勾选。"""
         cfg = self.config.expression
-        mode = _text(cfg.auto_check_mode).lower() or "off"
+        mode = str(getattr(cfg, "auto_check_mode", "report") or "report").strip().lower()
         if mode not in ("off", "report", "on"):
             mode = "report"
-        if mode == "off" and bool(cfg.auto_check):
-            mode = "on"
         result["auto_candidates"] = 0
         result["auto_checked"] = 0
-        if mode == "off" or not cfg.writeback:
+        if mode == "off":
             return
         candidates: List[Dict[str, Any]] = []
         for item in judged_rows:
@@ -2178,7 +2466,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     continue
                 if _text(entry.get("risk")) not in ("none", ""):
                     continue
-            if self._expression_auto_gate(_text(decision.get("style") or row.get("style"))):
+            gate_reason = self._expression_auto_gate(_text(decision.get("style") or row.get("style")))
+            if gate_reason:
+                skipped = result.setdefault("auto_skipped", {})
+                skipped[gate_reason] = _as_int(skipped.get(gate_reason)) + 1
                 continue
             candidates.append(item)
         if not candidates:
@@ -2214,7 +2505,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 "adopted": False,
                 "ts": int(time.time()),
             }
-            if mode == "on" and budget > 0:
+            if mode == "on" and budget > 0 and cfg.writeback:
                 try:
                     adopt_data: Dict[str, Any] = {"checked": True}
                     if cfg.auto_check_ui_mark:
@@ -2227,7 +2518,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 except Exception as exc:  # noqa: BLE001
                     result["errors"].append(f"自动勾选失败 {row.get('id')}: {exc}")
             log_entries.append(entry)
-        if cfg.auto_check_log and log_entries:
+        if cfg.auto_check_log and log_entries and cfg.writeback:
             try:
                 existing = self._read_json(self._data_path("auto_checked.json"), [])
                 if not isinstance(existing, list):
@@ -2241,6 +2532,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
     # ===== 表情包模块 =====
 
     async def _run_emoji(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        self._msg_cache = {}
+        self._ctx_cache = {}
         # 流程：读已注册表情 → 描述 embedding 去重（保留更常用、其余取消注册）→
         #      LLM 补「画面描述｜标签｜场景」→ 写回 → 对带标签的表情做自证 → 汇总
         cfg = self.config.emoji
@@ -2251,6 +2544,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "enriched": 0,
             "duplicates": 0,
             "unregistered": 0,
+            "undescribed": 0,
             "summary": "",
             "errors": [],
         }
@@ -2273,12 +2567,20 @@ class LearningKeeperPlugin(MaiBotPlugin):
             result["summary"] = "没有需要处理的表情"
             return result
 
-        # 1) 近似重复：按描述 embedding 聚类，保留更常用的
+        # 1) 近似重复：按描述 embedding 聚类，保留更常用的（无描述的不参与去重，避免同质化误删）
         try:
-            descriptions = [_text(row.get("description")) or "未描述表情" for row in emojis]
+            described = [row for row in emojis if _text(row.get("description"))]
+            if len(described) < len(emojis):
+                result["undescribed"] = len(emojis) - len(described)
+            descriptions = [_text(row.get("description")) for row in described]
             vectors = await self._embed(descriptions)
+            if len(vectors) != len(descriptions):
+                result["errors"].append(
+                    f"表情描述向量数量不一致({len(vectors)}/{len(descriptions)})，本轮跳过去重"
+                )
+                vectors = []
             clusters: List[Dict[str, Any]] = []
-            for row, vector in zip(emojis, vectors):
+            for row, vector in zip(described, vectors):
                 best = None
                 best_sim = 0.0
                 for cluster in clusters:
@@ -2306,6 +2608,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 for row in unregister:
                     if written >= int(cfg.max_unregister_per_run):
                         break
+                    if row.get("id") is None:
+                        continue
                     try:
                         await self._db(IMAGE_MODEL, "update", filters={"id": row.get("id")}, data={"is_registered": False})
                         written += 1
@@ -2384,6 +2688,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     min_confidence=0.6,
                     label="表情包库",
                     schema_hint='每个条目输出：{"key":"emoji:ID","agree":true/false,"keep":true/false,"description":"画面描述｜标签：a/b；场景：…（总长≤100字）","group_specific":true/false,"confidence":0-1,"sources":["url"]}',
+                    persist=not dry_run,
                 )
                 result["verified_locked"] = sum(1 for entry in verdicts.values() if entry.get("_locked"))
                 result["group_specific"] = sum(
@@ -2742,10 +3047,11 @@ class LearningKeeperPlugin(MaiBotPlugin):
         if raw:
             try:
                 loaded = json.loads(raw)
-                if isinstance(loaded, list):
-                    points = [str(x) for x in loaded if isinstance(x, str)]
             except Exception:  # noqa: BLE001
-                points = []
+                # 解析失败就放弃写入，避免把宿主已有的人物记忆整体覆盖为空
+                return False
+            if isinstance(loaded, list):
+                points = [str(x) for x in loaded if isinstance(x, str)]
         if any(line[:16] in point and line[-16:] in point for point in points):
             return True
         points.append(line)
@@ -3040,6 +3346,11 @@ class LearningKeeperPlugin(MaiBotPlugin):
         lines = lines[-max(20, int(cfg.max_messages_per_stream)):]
         result["scanned"] = len(lines)
         events = self._agenda_events()
+        if not isinstance(events, list):
+            events = []
+        if dry_run:
+            # dry-run：只在副本上演练，避免把未写人物卡的归档/丢弃状态留在内存里
+            events = [dict(event) for event in events if isinstance(event, dict)]
         now = time.time()
         archive_cap = max(0, _as_int(cfg.max_archive_per_run))
         archived_this_run = 0
@@ -3273,6 +3584,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 if due and now > due + float(cfg.expire_hours) * 3600:
                     if await try_archive(event, "已结束"):
                         result["archived"] += 1
+                elif not due and last and now - last > float(cfg.expire_hours) * 3600:
+                    if await try_archive(event, "已过期"):
+                        result["archived"] += 1
                 elif now - last > float(cfg.stale_days) * 86400:
                     if await try_archive(event, "已结束"):
                         result["archived"] += 1
@@ -3452,7 +3766,29 @@ class LearningKeeperPlugin(MaiBotPlugin):
             if persona:
                 header += f"\n用你自己的口吻（{nickname or '你自己'}：{persona}）来接，不要照搬上面的话。"
         block = header + "\n" + "\n".join(parts)
-        return block[: max(160, int(cfg.max_chars))]
+        limit = max(160, int(cfg.max_chars))
+        if len(block) <= limit:
+            return block
+        # 超长时优先压缩【最近的安排】行，确保【群友近况】/【关心提示】不被整段切掉
+        others_len = sum(len(part) + 1 for part in parts if not part.startswith("【最近的安排】"))
+        budget = max(0, limit - len(header) - 1 - others_len)
+        trimmed: List[str] = []
+        for part in parts:
+            if not part.startswith("【最近的安排】"):
+                trimmed.append(part)
+                continue
+            head, *body = part.split("\n")
+            kept: List[str] = []
+            used = 0
+            for line in body:
+                if used + len(line) + 1 > budget:
+                    break
+                kept.append(line)
+                used += len(line) + 1
+            if kept:
+                trimmed.append("\n".join([head] + kept))
+        block = header + "\n" + "\n".join(trimmed)
+        return block if len(block) <= limit else block[:limit]
 
     async def _inject_context(self, kwargs: Dict[str, Any], flag: str) -> Dict[str, Any]:
         """把背景信息插入到最后一条 SystemMessageItem 之后（planner / replyer 共用）。"""

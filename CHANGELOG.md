@@ -2,6 +2,52 @@
 
 本文件记录「麦麦很好奇（Memory Keeper）」每次发布的完整改动；README 里的「版本记录」是摘要，这里保留细节（含市场复审反馈、自查项与代码清理），便于回看与升级对照。
 
+## v0.1.7（2026-11-02）
+
+### 黑话「新词通道」
+- 背景：宿主把黑话学习提示词放宽后，近两天新增 159 条新词，但其中 149 条 `count=1`，被 `min_count=2` 挡在候选之外，插件只处理反复出现的旧词。
+- 新增 `[jargon] new_word_*` 一组配置：`new_word_enabled`（总开关）、`new_word_days`（只看近 N 天）、`new_word_min_age_hours`（满 24h 才判）、`new_word_min_evidence`（证据 ≥2 条）、`new_word_min_confidence`（门槛 0.8）、`new_word_max_per_run`（每轮上限 12，不占主候选名额）、`new_word_mark_unconfirmed`（证据不足时标注「（群内说法，待确认）」）。
+- 判定收紧：新词必须 `keep=true`、有含义、置信度 ≥ 门槛才写回；不通过只跳过、不删除宿主条目。
+- 实现：`_is_new_word_candidate()` / `_filter_new_word_decisions()`；`_run_jargon` 主候选与新词合并判定、分别限流；报告新增 `new_word_candidates` / `new_word_accepted` / `new_word_skipped`。
+
+### 配置与代码清理
+- 删除遗留的 `[expression] auto_check` 字段及其旧版自动勾选分支：自动采纳统一由 `auto_check_mode`（off/report/on）控制，避免两个开关语义冲突。
+- `auto_check_mode`、`persona_mode` 等固定取值字段改为 `Literal` 类型，WebUI 配置页渲染为下拉选项而不是输入框，减少手填错误。
+
+### 缺陷修复与性能优化（v0.1.7 内追加，审计驱动）
+
+对插件做了一次全面缺陷审查（三路只读审查 + 逐条读码核实），修复了以下问题：
+
+- 表情去重：只有「有描述」的表情参与 embedding 聚类，避免未描述表情因占位文本同向量而被批量取消注册；向量数量不一致时跳过去重并记录错误。
+- 常见词过滤：`_COMMON_WORDS_EXCLUDED` 由拼接长字符串改为词表集合，修正「整串相等比较导致过滤完全失效」的问题。
+- 人物卡记忆：`memory_points` 解析失败时直接放弃写入，不再以空列表覆盖宿主人物记忆。
+- 写回额度：`max_writes_per_run=0` 现在真正表示不写回；黑话写回额度统一计算（含整理/结算），表达式合并、判定、自证三处共用同一额度；表情补充/取消注册也有独立上限。
+- 只读观察：`dry_run` 时自证结果不再落盘为「已锁定」，否则之后开启写回会永远跳过这些条目。
+- 自证推进：模型未返回某个词时也累计 attempts，`verify_max_attempts`/`give_up` 能正常收敛，避免个别词每轮重复抓取与联网。
+- 联网预算：按「检索次数」而不是「词数」计，`verify_terms_per_run=0` 表示本轮不联网自证。
+- 黑话整理：先取 keeper 含义再合并计数，删除成功后才累加 count；删除失败不再造成下轮重复累加与含义丢失。
+- 嵌入调用：校验返回条数与维度，避免 `zip` 静默丢行。
+- 日程：`dry_run` 在事件副本上演练，不再把「已归档但未写人物卡」的状态留在内存；`confirmed` 且缺少具体时间的事件按 `expire_hours` 结算，不再长期挂在【最近的安排】。
+- 注入块：超长时优先压缩【最近的安排】，优先保住【群友近况】/【关心提示】。
+- 布尔归一：模型返回的 `"false"` 字符串不再被当成 true。
+- 可观测性：自动采纳被确定性过滤拦下的原因写入报告（`auto_skipped`），不再静默跳过。
+- 性能：黑话证据消息、表达判定上下文在同一轮内复用查询结果，减少重复 RPC；循环异常按退避重启而不退出；`_write_json` 改为原子写。
+
+### 学习节奏优化（v0.1.7 内追加）
+- 修复复核时间判断：宿主 `updated_timestamp` 是日期字符串，旧的 `_as_float()` 会解析成 0，导致所有已完成词每轮都被当成「逾期复核」重复写回、吃满写回额度；改用 `_parse_ts_seconds()` 后按 `recheck_days` 正常跳过。
+- `max_writes_per_run` 默认 40 → 120，加快积压词条的收尾速度。
+- 新词通道改为**累计批量识别**：`new_word_batch_threshold`（默认 10）条起才批量送去判定，`new_word_batch_size`（默认 6）条一批、与普通候选分开；`new_word_max_per_run` 12 → 60。未达阈值时报告里显示「新词累计 N 个（未达批量阈值，先积攒）」。
+
+### 实机验证修复
+- 宿主 `created_timestamp` / `updated_timestamp` 是日期字符串（`YYYY-MM-DD HH:MM:SS.ffffff`），`evidence_messages` 是嵌套 JSON 字符串：新增 `_parse_ts_seconds()` 与 `_count_message_evidence()`，并按消息条数（而非数组层数）判断证据是否足够。
+- 新词通道优先占用写回额度：主候选按词频先写会占满 `max_writes_per_run`，导致本轮判定通过的新词落不了库；`_jargon_apply` 改为先写新词、再写主候选。
+- 实机结果：一轮候选 64、新词候选 6、收录 2（春竹 / npy），`jargons` 完成数 55→57，含义已加「（群内说法，待确认）」前缀；用时约 243s、0 报错。
+
+### 默认值调优（来自实机日志）
+- `batch_size` 6→3、`max_tokens` 4000→6000：消除 `max_output tokens` 截断重试。
+- `max_candidates` 30→60、`recheck_days` 30→90：让 `count>=2` 的候选取满、少被复核挤占。
+- `[web] verify_terms_per_run` 4→2：自证由 8 轮降为 4 轮，实测单轮 259s、0 报错。
+
 ## v0.1.6（2026-11-01）
 
 ### 表达自动采纳可见性

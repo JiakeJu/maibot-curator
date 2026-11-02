@@ -81,12 +81,21 @@
 | `min_confidence` | 低于该置信度的判定不写回（默认 0.6；范围 0–1；例：0.6=置信度 60% 以上才写） | `0.6` |
 | `delete_rejected` | 把判定为常见词/无意义的候选从黑话库删除（true/false，默认 true） | `true` |
 | `clear_high_frequency_terms` | 写回成功时清空高频词表（整表清空、不可恢复；只影响黑话匹配打分，一般保持关闭；true/false，默认 false） | `false` |
-| `max_writes_per_run` | 单次最多写回多少条黑话（默认 40；范围 0–1000；0=不写回） | `40` |
+| `max_writes_per_run` | 单次最多写回多少条黑话（默认 120；范围 0–1000；0=不写回） | `120` |
 | `group_usage_hours` | 自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760） | `336` |
 | `dedupe_similar` | 收录前是否先整理：同一词的不同写法归一化去重、合并词频（true/false，默认 true） | `true` |
 | `recheck_complete` | 是否定期复核已完成的词条（看是否仍在使用、含义是否准确；true/false，默认 true） | `true` |
 | `recheck_days` | 已完成词条多少天未复核才重新判定（默认 30；范围 1–365） | `30` |
 | `context_lines` | 判定时参考的群聊上下文条数（默认 6；范围 0–30；0=只使用该词自身证据） | `6` |
+| `new_word_enabled` | 是否开辟「新词通道」：对刚出现、词频还没到 `min_count` 的新词单独判定（true/false，默认 true） | `true` |
+| `new_word_days` | 新词通道只处理创建多少天内的词（默认 14；范围 1–90） | `14` |
+| `new_word_min_age_hours` | 新词至少出现多少小时后才判定，避免一时玩梗被误收录（小时，默认 24；范围 0–240） | `24` |
+| `new_word_min_evidence` | 新词至少要有几条聊天证据才判定（默认 2；范围 1–20） | `2` |
+| `new_word_min_confidence` | 新词判定需要的更高置信度门槛（默认 0.8；范围 0–1） | `0.8` |
+| `new_word_max_per_run` | 每轮最多处理多少个新词（默认 60；范围 0–300；0=关闭新词通道；不占用 `max_candidates` 名额） | `60` |
+| `new_word_batch_threshold` | 新词累计到多少条后才统一批量识别（默认 10；范围 1–300；未达阈值先积攒，减少零散调用） | `10` |
+| `new_word_batch_size` | 新词批量识别时每次交给 LLM 的条数（默认 6；范围 1–50；与普通候选批次分开，避免大批量输出截断） | `6` |
+| `new_word_mark_unconfirmed` | 证据不足以自证时，是否仍收录并标注「（群内说法，待确认）」（true/false，默认 true） | `true` |
 
 ### 联网检索
 
@@ -119,7 +128,6 @@
 | `delete_meaningless` | 是否删除判定为无意义的表达（true/false，默认 true） | `true` |
 | `min_confidence` | 低于该置信度的判定不写回（默认 0.65；范围 0–1） | `0.65` |
 | `max_writes_per_run` | 单次最多写回多少条表达（默认 200；范围 0–2000） | `200` |
-| `auto_check` | 旧版自动勾选开关（true/false，默认 false；已由 auto_check_mode 取代，仅为兼容保留） | `false` |
 | `verification_rounds` | 多轮自证轮数（默认 2；范围 1–5；群内用法 + 联网检索） | `2` |
 | `verify_terms_per_run` | 单次最多对多少条表达做多轮自证（默认 8；范围 0–50） | `8` |
 | `group_usage_hours` | 自证时回看群内用法的时间窗口（小时，默认 336=14 天；范围 1–8760） | `336` |
@@ -128,7 +136,7 @@
 | `persona_max_rows` | 单次最多严判多少条表达（默认 80；范围 1–300；只判第一轮认定有意义的条目） | `80` |
 | `persona_max_chars` | 读入宿主人格设定的字数上限（默认 1200；范围 200–4000；太小判断不准，太大费 token） | `1200` |
 | `persona_traits` | 目标角色性格关键词（默认「友善、温和，偶尔毒舌和俏皮；不刻薄、不贬低他人、不油腻」；用顿号或分号分隔） | `友善、温和，偶尔毒舌和俏皮；不刻薄、不贬低他人、不油腻` |
-| `auto_check_mode` | 自动采纳模式（off=不自动；report=只生成候选清单不勾选；on=合格即自动勾选；默认 report，建议先跑一轮 report 观察） | `report` |
+| `auto_check_mode` | 自动采纳模式（下拉选择：off=不自动；report=只生成候选清单不勾选；on=合格即自动勾选；默认 report，建议先跑一轮 report 观察） | `report` |
 | `auto_check_min_confidence` | 自动采纳所需的判定置信度（默认 0.9；范围 0–1） | `0.9` |
 | `auto_check_double_check` | 自动采纳前是否二次复核（true/false，默认 true；多一次 LLM 调用换更高准确率） | `true` |
 | `auto_check_max_per_run` | 单次最多自动勾选多少条（默认 10；范围 0–500） | `10` |
@@ -240,6 +248,8 @@
 
 ## 版本记录
 
+- `v0.1.7`（2026-11-02）：黑话新增「新词通道」——宿主近几天大量只出现 1 次的新词，此前因 `min_count=2` 永远进不了候选；现在对创建满 24 小时、证据 ≥2 条、14 天内出现的新词单独判定（默认每轮最多 12 个，不占 `max_candidates` 名额），并要求更高置信度（默认 0.8）；联网/群内证据不足以自证时，仍会收录但含义前标注「（群内说法，待确认）」，不通过则跳过、不删除。新增 7 个 `[jargon] new_word_*` 配置项，可整体关闭。
+另外按实测调优默认值：`batch_size` 6→3、`max_tokens` 4000→6000、`max_candidates` 30→60、`recheck_days` 30→90；`[web] verify_terms_per_run` 4→2，自证从 8 轮降到 4 轮，实测超时/截断报错消失。
 - `v0.1.6`（2026-11-01）：表达自动采纳会同时把来源标记为 USER，因此在 WebUI「仅精选」筛选里可见（真实来源仍记录在 `auto_checked.json`，`auto_check_ui_mark=false` 可关闭该显示）；多轮自证改为按小批次（每批最多 2 条）分别请求 LLM，减少单次提示体积与 120s 硬超时风险；新增 `[expression] auto_check_ui_mark` 配置项。
 - `v0.1.5`（2026-10-31）：联网检索改为默认使用宿主「联网服务」提供的 `web.search` / `web.fetch` 能力（与宿主自己的联网工具共用同一套服务与 Key），插件不再要求自备 DeepSeek API Key；`[web] api_key` 变为可选——留空走宿主、填写则插件直连 DeepSeek；两种方式都不可用时自动跳过联网、只用群内证据。同时「日程」扩展为「群友近况 / 日程」——除日程待办外，还抽取群友的短时状态（在加班、感冒、考试周、出差、心情不好等），默认保留 48 小时、没人再提自动淡忘、不进人物卡；注入新增【群友近况】与【关心提示】（近况偏负面时给一句关心建议），并按 bot 人格设定提醒模型「用你自己的口吻来接」；`[agenda]` 新增 `state_enabled`/`state_ttl_hours`/`state_max_events`/`state_confirm_confidence`/`care_enabled`，`[inject]` 新增 `states`/`care`/`persona_style`/`persona_max_chars` 并把总字数上限默认调到 600。日程抽取 prompt 改为同时识别 `kind=plan/state`，近况带 `polarity`（正/中/负）与 `topic` 关键词；manifest 新增 `web.search` / `web.fetch` 能力声明。
 - `v0.1.4`（2026-10-29）：表达方式新增「人格适配严判」：对会被采用的表达，按宿主人格设定再判一轮，删掉攻击性强、阴阳怪气、适用面窄、与角色不符的条目；新增自动精选模式 `[expression] auto_check_mode`（off/report/on，默认 report 只出候选清单）、置信度门槛、二次复核、单轮勾选上限与 `auto_checked.json` 候选日志；表达判定结合群聊上下文（`context_lines`）；人格判定新增取向开关 `[expression] persona_mode`（conservative=保守学习，优先角色一致性；adapt=主动向群内交流风格靠拢，允许群内流行、干净、不伤人的说法），默认 conservative；默认每 12 小时跑一次、单轮扫 300 条。黑话改为「先整理再判断」：收录前归一化去重、合并词频、剔除无意义条目，已完成的词条定期复核（`recheck_complete`/`recheck_days`），判定结合群内真实用法与上下文；默认每 4 小时跑一次。表情补描述时也会参考群聊上下文。manifest 简介精简为两句话，技术细节保留在 README。
