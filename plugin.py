@@ -304,7 +304,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="插件总开关（true/false，默认 true；关闭后不再巡检，也不再注入上下文）")
-    config_version: str = Field(default="0.1.7", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
+    config_version: str = Field(default="0.1.8", description="配置版本（内部记录用，随插件升级自动更新，默认与插件版本一致；一般无需修改）")
 
 
 class ScheduleConfig(PluginConfigBase):
@@ -347,13 +347,17 @@ class JargonConfig(PluginConfigBase):
     context_lines: int = Field(default=6, description="判定时参考的群聊上下文条数（默认 6；范围 0–30；0=只使用该词自身证据）")
     new_word_enabled: bool = Field(default=True, description="是否开辟「新词通道」：对刚出现、词频还没到 min_count 的新词单独判定（true/false，默认 true）")
     new_word_days: int = Field(default=14, description="新词通道只处理创建多少天内的词（默认 14；范围 1–90；太久的历史新词不再补）")
-    new_word_min_age_hours: int = Field(default=24, description="新词至少出现多少小时后才判定，避免一时玩梗被误收录（小时，默认 24；范围 0–240）")
-    new_word_min_evidence: int = Field(default=2, description="新词至少要有几条聊天证据才判定（默认 2；范围 1–20；证据不足跳过）")
-    new_word_min_confidence: float = Field(default=0.8, description="新词判定需要的更高置信度门槛（默认 0.8；范围 0–1；比普通候选更严）")
+    new_word_min_age_hours: int = Field(default=0, description="新词至少出现多少小时后才判定（小时，默认 0=出现即学；范围 0–240；调大可避免一时玩梗被误收录）")
+    new_word_min_evidence: int = Field(default=1, description="新词至少要有几条聊天证据才判定（默认 1；范围 1–20；证据不足跳过）")
     new_word_max_per_run: int = Field(default=60, description="每轮最多处理多少个新词（默认 60；范围 0–300；0=关闭新词通道；不占用 max_candidates 名额）")
     new_word_batch_threshold: int = Field(default=10, description="新词累计到多少条后才统一批量识别（默认 10；范围 1–300；未达阈值先积攒，减少零散调用）")
     new_word_batch_size: int = Field(default=6, description="新词批量识别时每次交给 LLM 的条数（默认 6；范围 1–50；与普通候选批次分开，避免大批量输出截断）")
+    new_word_rejudge_days: int = Field(default=7, description="新词被判过之后、证据没有变化时，多少天内不再重复判定；证据变多会自动重判（范围 1–90，默认 7 天）")
     new_word_mark_unconfirmed: bool = Field(default=True, description="网络/群内证据不足以自证时，是否仍收录并在含义前标注「（群内说法，待确认）」（true/false，默认 true）")
+    watch_enabled: bool = Field(default=True, description="是否启用「收录即学」：宿主一收录新词，就单独跑一轮判定，不再等下一轮巡检（true/false，默认 true）")
+    watch_interval_seconds: int = Field(default=60, description="「收录即学」多久检查一次新收录（秒，默认 60；范围 15–600；越短越及时、调用略多）")
+    watch_batch_size: int = Field(default=6, description="每次触发最多判定几个新词（默认 6；范围 1–20；二次出现的巩固也占这个名额）")
+    watch_max_rounds_per_hour: int = Field(default=20, description="「收录即学」每小时最多触发多少轮，防止 LLM 被刷爆（默认 20；范围 1–120）")
 
 
 class WebSearchConfig(PluginConfigBase):
@@ -561,6 +565,10 @@ class LearningKeeperPlugin(MaiBotPlugin):
         self._persona_cache: Optional[str] = None
         self._msg_cache: Dict[str, Dict[str, Any]] = {}
         self._ctx_cache: Dict[str, List[str]] = {}
+        self._watch_task: Optional[asyncio.Task[None]] = None
+        self._watch_seen_id = 0
+        self._watch_rounds: List[float] = []
+        self._watch_last_report: Dict[str, Any] = {}
 
     # ===== 生命周期 =====
 
@@ -568,6 +576,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
         self._state = self._read_json(self._data_path("state.json"), {}) or {}
         self._web_cache = self._read_json(self._data_path("web_cache.json"), {}) or {}
         self._jargon_verified = self._read_json(self._data_path("jargon_verified.json"), {}) or {}
+        self._jargon_new_words = self._read_json(self._data_path("jargon_new_words.json"), {}) or {}
         self._expression_verified = self._read_json(self._data_path("expression_verified.json"), {}) or {}
         self._emoji_verified = self._read_json(self._data_path("emoji_verified.json"), {}) or {}
         self._agenda = self._read_json(self._data_path("agenda.json"), {}) or {}
@@ -581,6 +590,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             self.config.web.enabled,
         )
         self._start_loop()
+        self._start_watch_loop()
 
     async def on_unload(self) -> None:
         self._stopping = True
@@ -592,6 +602,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
                 await task
             except asyncio.CancelledError:
                 pass
+        self._stop_watch_loop_sync()
         self.ctx.logger.info("[maibot-curator] 已卸载")
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
@@ -606,9 +617,12 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     await task
                 except asyncio.CancelledError:
                     pass
+            await self._stop_watch_loop()
             return
         # 重新启用（或改调度）时确保后台循环在跑：任务被 cancel 后只有 on_load 会重新拉起，这里补上
         self._start_loop()
+        await self._stop_watch_loop()
+        self._start_watch_loop()
 
     def _start_loop(self) -> None:
         if not self.config.plugin.enabled:
@@ -618,6 +632,173 @@ class LearningKeeperPlugin(MaiBotPlugin):
             return
         self._stopping = False
         self._task = asyncio.create_task(self._loop(), name="maibot-curator-loop")
+
+    # ===== 收录即学（watcher）：宿主一收录新词就单独判一轮 =====
+
+    def _start_watch_loop(self) -> None:
+        if not self.config.plugin.enabled:
+            return
+        if not self.config.jargon.enabled or not self.config.jargon.watch_enabled:
+            return
+        if self._watch_task is not None and not self._watch_task.done():
+            return
+        self._stopping = False
+        self._watch_task = asyncio.create_task(self._watch_loop(), name="maibot-curator-watch")
+
+    def _stop_watch_loop_sync(self) -> None:
+        task = self._watch_task
+        self._watch_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _stop_watch_loop(self) -> None:
+        task = self._watch_task
+        self._watch_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _watch_loop(self) -> None:
+        backoff = 0
+        while not self._stopping:
+            try:
+                interval = max(15, int(self.config.jargon.watch_interval_seconds))
+                await asyncio.sleep(interval)
+                if self._stopping:
+                    break
+                await self._watch_once()
+                backoff = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 后台任务必须自愈
+                backoff = min(backoff + 1, 6)
+                self.ctx.logger.error(
+                    "[maibot-curator] 收录即学异常（%ss 后重试）: %s", 60 * backoff, exc, exc_info=True
+                )
+                try:
+                    await asyncio.sleep(60 * backoff)
+                except asyncio.CancelledError:
+                    raise
+
+    async def _watch_once(self) -> None:
+        """检查宿主新收录的黑话：新词立即判定；之前判过的词二次出现（证据变多）再巩固一次。"""
+        cfg = self.config.jargon
+        if not cfg.enabled or not cfg.watch_enabled or not bool(cfg.new_word_enabled):
+            return
+        now = time.time()
+        self._watch_rounds = [t for t in self._watch_rounds if now - t < 3600]
+        if len(self._watch_rounds) >= max(1, int(cfg.watch_max_rounds_per_hour)):
+            return
+        rows = await self._db(JARGON_MODEL, "get", order_by="-id", limit=40)
+        if not isinstance(rows, list) or not rows:
+            return
+        max_id = max((_as_int(item.get("id")) for item in rows if isinstance(item, dict)), default=0)
+        first = self._watch_seen_id == 0
+        pending: List[Dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            rid = _as_int(item.get("id"))
+            content = _text(item.get("content"))
+            if rid <= 0 or not content:
+                continue
+            count = _as_int(item.get("count"))
+            meaning = _text(item.get("meaning"))
+            if bool(item.get("is_complete")):
+                # 巩固：之前判过（在 _jargon_new_words 里）且证据指纹变化、频次够
+                if first or content not in self._jargon_new_words or count < max(2, int(cfg.min_count)):
+                    continue
+                record = self._jargon_new_words.get(content) or {}
+                if record.get("fingerprint") == self._new_word_fingerprint(item):
+                    continue
+                marked = dict(item)
+                marked["_consolidate"] = True
+                pending.append(marked)
+            else:
+                if rid <= self._watch_seen_id or meaning:
+                    continue
+                if _count_message_evidence(item.get("evidence_messages")) < max(1, int(cfg.new_word_min_evidence)):
+                    continue
+                marked = dict(item)
+                marked["_new_word"] = True
+                pending.append(marked)
+        self._watch_seen_id = max(self._watch_seen_id, max_id)
+        if first:
+            self.ctx.logger.info("[maibot-curator] 收录即学：从当前进度开始监听（水位 id=%s）", max_id)
+            return
+        if not pending:
+            return
+        pending = pending[: max(1, int(cfg.watch_batch_size))]
+        writeback = bool(cfg.writeback)
+        started = time.time()
+        result: Dict[str, Any] = {
+            "dry_run": not writeback,
+            "candidates": len(pending),
+            "decisions": [],
+            "errors": [],
+            "applied": {"updated": 0, "deleted": 0, "settled": 0, "hf_cleared": False},
+            "new_word_candidates": 0,
+            "new_word_accepted": 0,
+            "new_word_skipped": 0,
+            "new_word_cooldown": 0,
+            "web_used": 0,
+        }
+        self._nw_cooldown = 0
+        self._nw_state_dirty = False
+        new_rows = [item for item in pending if item.get("_new_word")]
+        cons_rows = [item for item in pending if item.get("_consolidate")]
+        decisions: List[Dict[str, Any]] = []
+        batch_size = max(1, int(cfg.new_word_batch_size))
+        for start in range(0, len(new_rows), batch_size):
+            decisions.extend(await self._jargon_judge_batch(new_rows[start : start + batch_size], result, new_word=True))
+        for start in range(0, len(cons_rows), batch_size):
+            decisions.extend(await self._jargon_judge_batch(cons_rows[start : start + batch_size], result))
+        if new_rows and decisions:
+            decisions = self._filter_new_word_decisions(new_rows, decisions, result)
+            if self._nw_state_dirty:
+                self._save_jargon_new_words()
+        cons_map = {_text(item.get("content")): item for item in cons_rows}
+        for decision in decisions:
+            content = _text(decision.get("content"))
+            row = cons_map.get(content)
+            if row is None:
+                continue
+            decision["_new_word"] = False
+            record = self._jargon_verified.get(content) or {}
+            if _as_bool(decision.get("keep")) and _text(decision.get("meaning")):
+                if record.get("status") == "locked":
+                    decision["meaning"] = _text(decision.get("meaning")).replace("（群内说法，待确认）", "")[:60]
+            self._mark_new_word_judged(
+                content, row, "consolidated", decision.get("confidence"), decision.get("meaning")
+            )
+            self._nw_state_dirty = True
+        if self._nw_state_dirty:
+            self._save_jargon_new_words()
+        if writeback and decisions:
+            await self._jargon_apply(pending, decisions, result)
+        self._watch_rounds.append(now)
+        elapsed = time.time() - started
+        self._watch_last_report = {
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "pending": len(pending),
+            "new_words": len(new_rows),
+            "consolidate": len(cons_rows),
+            "accepted": result["new_word_accepted"],
+            "updated": result["applied"]["updated"],
+            "elapsed": round(elapsed, 1),
+            "errors": list(result["errors"])[:3],
+        }
+        self.ctx.logger.info(
+            "[maibot-curator] 收录即学：新词 %s 个、巩固 %s 个 → 收录 %s、写回 %s（%.1fs）",
+            len(new_rows),
+            len(cons_rows),
+            result["new_word_accepted"],
+            result["applied"]["updated"],
+            elapsed,
+        )
 
     async def _loop(self) -> None:
         try:
@@ -673,6 +854,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "enabled": self.config.plugin.enabled,
             "last_run_at": self._last_run_at,
             "report": self._last_report or {},
+            "watch": getattr(self, "_watch_last_report", {}),
         }
 
     # ===== 调度 =====
@@ -1103,6 +1285,51 @@ class LearningKeeperPlugin(MaiBotPlugin):
             self._save_verified(kind)
         return verdicts
 
+    def _save_jargon_new_words(self) -> None:
+        store = getattr(self, "_jargon_new_words", None) or {}
+        self._write_json(self._data_path("jargon_new_words.json"), store)
+
+    def _new_word_fingerprint(self, row: Dict[str, Any]) -> str:
+        evidence = _count_message_evidence(row.get("evidence_messages"))
+        last_seen = _text(
+            row.get("last_seen_timestamp") or row.get("updated_timestamp") or row.get("created_timestamp")
+        )
+        return f"{evidence}|{last_seen}"
+
+    def _mark_new_word_judged(
+        self,
+        content: str,
+        row: Optional[Dict[str, Any]],
+        verdict: str,
+        confidence: float,
+        meaning: str = "",
+    ) -> None:
+        content = _text(content)
+        if not content:
+            return
+        if getattr(self, "_jargon_new_words", None) is None:
+            self._jargon_new_words = {}
+        self._jargon_new_words[content] = {
+            "fingerprint": self._new_word_fingerprint(row) if isinstance(row, dict) else "",
+            "verdict": verdict,
+            "confidence": round(float(confidence or 0.0), 3),
+            "meaning": _text(meaning)[:60],
+            "judged_at": time.time(),
+        }
+        self._nw_state_dirty = True
+
+    def _prune_new_word_state(self) -> None:
+        if getattr(self, "_jargon_new_words", None) is None:
+            self._jargon_new_words = {}
+        cutoff = time.time() - 60 * 86400
+        stale = [
+            key
+            for key, value in self._jargon_new_words.items()
+            if not isinstance(value, dict) or _as_float(value.get("judged_at")) < cutoff
+        ]
+        for key in stale:
+            self._jargon_new_words.pop(key, None)
+
     # ===== 黑话模块 =====
 
     async def _run_jargon(self, report: Dict[str, Any]) -> Dict[str, Any]:
@@ -1112,6 +1339,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
         #      低置信/新词走多轮自证（群内用法+联网）→ 写回（更新含义/删除/标记完成）→ 汇总
         cfg = self.config.jargon
         dry_run = not cfg.writeback
+        self._nw_cooldown = 0
+        self._nw_state_dirty = False
+        self._prune_new_word_state()
         result: Dict[str, Any] = {
             "dry_run": dry_run,
             "candidates": 0,
@@ -1174,6 +1404,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             new_words = []
         pending: List[Dict[str, Any]] = candidates + new_words
         result["new_word_candidates"] = len(new_words)
+        result["new_word_cooldown"] = _as_int(getattr(self, "_nw_cooldown", 0))
         result["candidates"] = len(pending)
         if not pending:
             result["summary"] = "没有需要处理的黑话候选"
@@ -1187,7 +1418,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
         new_word_batch = max(1, int(cfg.new_word_batch_size))
         for start in range(0, len(new_words), new_word_batch):
             batch = new_words[start : start + new_word_batch]
-            decisions.extend(await self._jargon_judge_batch(batch, result))
+            decisions.extend(await self._jargon_judge_batch(batch, result, new_word=True))
 
         # 联网复核：新收录词 / 低置信 / 模型自己要求联网的词 → 多轮多源自证（群内用法 + 联网检索），一致才固定
         result["verified_locked"] = 0
@@ -1227,6 +1458,8 @@ class LearningKeeperPlugin(MaiBotPlugin):
             if _as_int(record.get("attempts")) >= max_attempts and record.get("status") != "locked":
                 decision["give_up"] = True
         decisions = self._filter_new_word_decisions(pending, decisions, result)
+        if getattr(self, "_nw_state_dirty", False):
+            self._save_jargon_new_words()
         result["decisions"] = decisions
         if dry_run:
             result["summary"] = f"候选 {len(candidates)} 个，判定 {len(decisions)} 条（只报告）"
@@ -1242,6 +1475,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
                     f"；新词 {_as_int(result.get('new_word_candidates'))} 个，"
                     f"收录 {_as_int(result.get('new_word_accepted'))} 个"
                 )
+            cooldown = _as_int(result.get("new_word_cooldown"))
+            if cooldown:
+                extra += f"；{cooldown} 个判过且证据未变化（冷却中）"
         result["summary"] = (
             f"候选 {len(pending)} 个，更新 {result['applied']['updated']}，"
             f"删除 {result['applied']['deleted']}，标记完成 {result['applied'].get('settled', 0)}，自证固定 {result.get('verified_locked', 0)} 个"
@@ -1265,7 +1501,19 @@ class LearningKeeperPlugin(MaiBotPlugin):
             return False
         if age > max(1, int(cfg.new_word_days)) * 86400:
             return False
-        return _count_message_evidence(row.get("evidence_messages")) >= max(1, int(cfg.new_word_min_evidence))
+        if _count_message_evidence(row.get("evidence_messages")) < max(1, int(cfg.new_word_min_evidence)):
+            return False
+        store = getattr(self, "_jargon_new_words", None)
+        if store is None:
+            store = {}
+            self._jargon_new_words = store
+        record = store.get(_text(row.get("content"))) or {}
+        if record and record.get("fingerprint") == self._new_word_fingerprint(row):
+            judged_at = _as_float(record.get("judged_at"))
+            if judged_at > 0 and (now_ts - judged_at) < max(1, int(cfg.new_word_rejudge_days)) * 86400:
+                self._nw_cooldown = _as_int(getattr(self, "_nw_cooldown", 0)) + 1
+                return False
+        return True
 
     def _filter_new_word_decisions(
         self,
@@ -1275,20 +1523,24 @@ class LearningKeeperPlugin(MaiBotPlugin):
     ) -> List[Dict[str, Any]]:
         """新词判定收紧：更高置信度门槛；证据不足时可标注「群内说法，待确认」；不通过则不写回、不删除。"""
         cfg = self.config.jargon
-        new_contents = {_text(row.get("content")) for row in pending if row.get("_new_word")}
-        if not new_contents:
+        new_rows = {_text(row.get("content")): row for row in pending if row.get("_new_word")}
+        if not new_rows:
             return decisions
-        min_conf = max(0.0, min(1.0, float(cfg.new_word_min_confidence)))
+        accept_conf = max(0.5, float(cfg.min_confidence))
         kept: List[Dict[str, Any]] = []
+        decided = set()
         for decision in decisions:
             content = _text(decision.get("content"))
-            if content not in new_contents:
+            decided.add(content)
+            if content not in new_rows:
                 kept.append(decision)
                 continue
             confidence = _as_float(decision.get("confidence"))
             meaning = _text(decision.get("meaning"))[:60]
-            if not (_as_bool(decision.get("keep")) and meaning and confidence >= min_conf):
+            ok = _as_bool(decision.get("keep")) and bool(meaning) and confidence >= accept_conf
+            if not ok:
                 result["new_word_skipped"] = _as_int(result.get("new_word_skipped")) + 1
+                self._mark_new_word_judged(content, new_rows.get(content), "rejected", confidence, meaning)
                 continue
             record = self._jargon_verified.get(content) or {}
             if (
@@ -1301,6 +1553,12 @@ class LearningKeeperPlugin(MaiBotPlugin):
             decision["_new_word"] = True
             result["new_word_accepted"] = _as_int(result.get("new_word_accepted")) + 1
             kept.append(decision)
+            self._mark_new_word_judged(content, new_rows.get(content), "accepted", confidence, meaning)
+        for content, row in new_rows.items():
+            if content in decided:
+                continue
+            result["new_word_skipped"] = _as_int(result.get("new_word_skipped")) + 1
+            self._mark_new_word_judged(content, row, "skipped", 0.0, "")
         return kept
 
     async def _jargon_organize(self, rows: List[Dict[str, Any]], result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1483,7 +1741,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
         return lines[:limit]
 
     async def _jargon_judge_batch(
-        self, batch: List[Dict[str, Any]], result: Dict[str, Any]
+        self, batch: List[Dict[str, Any]], result: Dict[str, Any], new_word: bool = False
     ) -> List[Dict[str, Any]]:
         evidence: Dict[str, List[str]] = {}
         for item in batch:
@@ -1491,7 +1749,7 @@ class LearningKeeperPlugin(MaiBotPlugin):
             if not content:
                 continue
             evidence[content] = await self._jargon_evidence(item, result)
-        prompt = self._jargon_prompt(batch, evidence)
+        prompt = self._jargon_prompt(batch, evidence, new_word=new_word)
         try:
             text = await self._llm(
                 prompt,
@@ -1504,7 +1762,9 @@ class LearningKeeperPlugin(MaiBotPlugin):
             return []
         return self._parse_jargon_decisions(text, batch, result)
 
-    def _jargon_prompt(self, batch: List[Dict[str, Any]], evidence: Dict[str, List[str]]) -> str:
+    def _jargon_prompt(
+        self, batch: List[Dict[str, Any]], evidence: Dict[str, List[str]], new_word: bool = False
+    ) -> str:
         parts = [
             "你是 QQ 群黑话词库的整理助手。下面是从群聊里自动收集的候选词，以及它们在真实聊天里出现的片段。",
             "请逐条判断：",
@@ -1516,9 +1776,21 @@ class LearningKeeperPlugin(MaiBotPlugin):
             "4) needs_web：如果你觉得这是网络流行语/缩写，但仅凭群聊证据无法确定含义，设为 true（最多 6 个词）。",
             "5) 结合证据里的真实聊天上下文综合判断：这个词在群里怎么用、使用场景是什么；如果证据显示它已不再使用、或含义与已有释义不符，就把 keep 设为 false 或给出更准确的 meaning。",
             "6) 标记为「复核」的词条：重点看它是否仍在使用、原含义是否准确；仍准确就 keep=true 并给出 meaning，不再使用则 keep=false。",
-            "",
-            "候选：",
         ]
+        if new_word:
+            parts.extend(
+                [
+                    "7) 下面的候选是刚出现、出现次数还很低的新词（频次未达常规门槛）。判断标准放宽为「群里是不是固定地用它表达某个意思」：",
+                    "   只要证据显示群友在相同语境里反复这样用（哪怕只出现两次），就应 keep=true 并给出含义；",
+                    "   只有明显是普通名词 / 人名昵称 / 群名 / 游戏专名 / 无意义片段时才 keep=false。",
+                ]
+            )
+        parts.extend(
+            [
+                "",
+                "候选：",
+            ]
+        )
         for item in batch:
             content = _text(item.get("content"))
             if not content:
